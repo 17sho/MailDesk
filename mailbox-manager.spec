@@ -49,6 +49,7 @@ common = dict(
     upx=True,
     console=False,
     icon=str(ROOT / "assets" / "app.ico"),
+    version=str(ROOT / "assets" / "version_info.txt"),
     uac_admin=False,
 )
 

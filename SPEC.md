@@ -84,7 +84,7 @@ py -3.12 -m venv .venv
 
 # 测试与静态检查
 .\.venv\Scripts\python.exe -m pytest -q
-.\.venv\Scripts\python.exe -m ruff check src tests build.py
+.\.venv\Scripts\python.exe -m ruff check src tests build.py release.py
 
 # 打包
 .\.venv\Scripts\python.exe build.py --mode onedir

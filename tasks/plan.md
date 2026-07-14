@@ -87,7 +87,7 @@ GUI + 入口 + 资源 → PyInstaller spec/build.py → 构建验证
 
 ```powershell
 py -3.12 -m pytest -q
-py -3.12 -m ruff check src tests build.py
+py -3.12 -m ruff check src tests build.py release.py
 $env:QT_QPA_PLATFORM='offscreen'; py -3.12 -m pytest -q tests/gui
 py -3.12 build.py --mode onedir --clean
 ```

@@ -6,7 +6,7 @@
 
 ## 验证
 
-- [ ] `python -m ruff check src tests build.py`
+- [ ] `python -m ruff check src tests build.py release.py`
 - [ ] `python -m pytest -q`
 - [ ] 涉及 UI 时已在浅色/深色和窄窗口下检查
 - [ ] 未提交真实账号、凭据、Token、邮件或本地数据库

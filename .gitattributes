@@ -17,3 +17,6 @@ LICENSE text eol=lf
 
 *.ico binary
 *.png binary
+
+# Preserve upstream license texts verbatim, including their historical spacing.
+legal/*.txt text eol=lf -whitespace

@@ -26,7 +26,7 @@ $env:PYTHONPATH = "$PWD\src"
 提交前运行：
 
 ```powershell
-py -3.12 -m ruff check src tests build.py
+py -3.12 -m ruff check src tests build.py release.py
 py -3.12 -m pytest -q
 ```
 
