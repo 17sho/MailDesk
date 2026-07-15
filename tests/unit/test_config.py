@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import Mock
 
 import pytest
 
-from mailbox_manager.app import acquire_instance_lock, report_update_health
+from mailbox_manager.app import (
+    acquire_instance_lock,
+    report_update_health,
+    schedule_startup_probe,
+)
 from mailbox_manager.config import AppPaths
 
 
@@ -69,3 +74,27 @@ def test_instance_lock_allows_only_one_process_per_data_directory(tmp_path) -> N
     replacement = acquire_instance_lock(paths)
     assert replacement is not None
     replacement.unlock()
+
+
+def test_webengine_startup_probe_exercises_reader_and_quits(monkeypatch) -> None:
+    callbacks: list[tuple[int, object]] = []
+    window = Mock()
+    logger = Mock()
+    monkeypatch.setenv("MAILDESK_STARTUP_PROBE", "webengine")
+    monkeypatch.setattr(
+        "mailbox_manager.app.QTimer.singleShot",
+        lambda delay, callback: callbacks.append((delay, callback)),
+    )
+
+    assert schedule_startup_probe(window, logger) is True
+    assert "MAILDESK_STARTUP_PROBE" not in os.environ
+    assert callbacks[0][0] == 0
+
+    callbacks[0][1]()  # type: ignore[operator]
+
+    window.message_body.setPlainText.assert_called_once_with(
+        "MailDesk packaged WebEngine probe"
+    )
+    logger.info.assert_called_once_with("MailDesk WebEngine startup probe passed")
+    assert callbacks[1][0] == 250
+    assert callbacks[1][1] == window.request_quit

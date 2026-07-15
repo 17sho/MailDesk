@@ -52,6 +52,10 @@ jobs:
         shell: bash
         run: |
           test -x dist/MailDesk.app/Contents/MacOS/MailDesk
+          webengine_framework="dist/MailDesk.app/Contents/Frameworks/PySide6/Qt/lib/QtWebEngineCore.framework"
+          test -x "$webengine_framework/Helpers/QtWebEngineProcess.app/Contents/MacOS/QtWebEngineProcess"
+          test -f "$webengine_framework/Resources/icudtl.dat"
+          test -f "$webengine_framework/Resources/qtwebengine_resources.pak"
           file dist/MailDesk.app/Contents/MacOS/MailDesk
           file dist/MailDesk.app/Contents/MacOS/MailDesk | grep -q "${{ matrix.expected_machine }}"
           plutil -lint dist/MailDesk.app/Contents/Info.plist
@@ -69,12 +73,13 @@ jobs:
           data_dir="$RUNNER_TEMP/maildesk-data-${{ matrix.asset_arch }}"
           stdout_log="$RUNNER_TEMP/maildesk-${{ matrix.asset_arch }}.stdout.log"
           export MAILDESK_DATA_DIR="$data_dir"
+          export MAILDESK_STARTUP_PROBE=webengine
           mkdir -p "$data_dir"
           dist/MailDesk.app/Contents/MacOS/MailDesk >"$stdout_log" 2>&1 &
           app_pid=$!
           ready=0
           for _ in $(seq 1 45); do
-            if grep -q "MailDesk started" "$data_dir/logs/app.log" 2>/dev/null; then
+            if grep -q "MailDesk WebEngine startup probe passed" "$data_dir/logs/app.log" 2>/dev/null; then
               ready=1
               break
             fi
@@ -91,8 +96,17 @@ jobs:
             kill "$app_pid" 2>/dev/null || true
             exit 1
           fi
+          for _ in $(seq 1 20); do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              wait "$app_pid"
+              exit 0
+            fi
+            sleep 0.25
+          done
           kill "$app_pid" 2>/dev/null || true
           wait "$app_pid" 2>/dev/null || true
+          echo "MailDesk did not quit after the WebEngine startup probe" >&2
+          exit 1
       - name: Package DMG and ZIP
         id: package
         shell: bash

@@ -7,7 +7,7 @@ import re
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QLibraryInfo, QLocale, QLockFile, QTranslator
+from PySide6.QtCore import QLibraryInfo, QLocale, QLockFile, QTimer, QTranslator
 from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -165,6 +165,28 @@ def acquire_instance_lock(paths: AppPaths) -> QLockFile | None:
     return lock
 
 
+def schedule_startup_probe(
+    window: MainWindow,
+    logger: logging.Logger,
+) -> bool:
+    """Exercise packaged subsystems that a window-only smoke test cannot cover."""
+
+    probe = os.environ.pop("MAILDESK_STARTUP_PROBE", "").strip().casefold()
+    if not probe:
+        return False
+    if probe != "webengine":
+        logger.warning("Unknown MailDesk startup probe: %s", probe)
+        return False
+
+    def run_probe() -> None:
+        window.message_body.setPlainText("MailDesk packaged WebEngine probe")
+        logger.info("MailDesk WebEngine startup probe passed")
+        QTimer.singleShot(250, window.request_quit)
+
+    QTimer.singleShot(0, run_probe)
+    return True
+
+
 def run() -> int:
     application = QApplication.instance() or QApplication(sys.argv)
     application.setApplicationName("MailDesk")
@@ -213,6 +235,7 @@ def run() -> int:
         window.enable_tray(tray)
         tray.show()
     window.show()
+    schedule_startup_probe(window, logger)
     try:
         if report_update_health(paths):
             logger.info("MailDesk update startup health check passed")
