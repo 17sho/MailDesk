@@ -7,6 +7,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -47,48 +48,58 @@ _TEST_PUBLIC_KEY = _TEST_SIGNING_KEY.public_key().public_bytes(
 _SIGNED_FIXTURES: dict[str, bytes] = {}
 
 
-def _compile_update_health_probe(path: Path, *, healthy: bool) -> None:
-    source = path.with_suffix(".cs")
-    health_code = (
-        "var token = Environment.GetEnvironmentVariable(\"MAILDESK_UPDATE_HEALTH_TOKEN\");"
-        "var target = Environment.GetEnvironmentVariable(\"MAILDESK_UPDATE_HEALTH_FILE\");"
-        "if (!String.IsNullOrEmpty(token) && !String.IsNullOrEmpty(target)) "
-        "{ File.WriteAllText(target, token); } Thread.Sleep(6500); return 0;"
-        if healthy
-        else "return 7;"
-    )
-    source.write_text(
-        "using System; using System.IO; using System.Threading; "
-        f"public static class Program {{ public static int Main() {{ {health_code} }} }}",
+@pytest.fixture(scope="module")
+def packaged_update_health_probe(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if os.name != "nt":
+        pytest.skip("PyInstaller update probe is Windows-only")
+    root = tmp_path_factory.mktemp("packaged-update-health-probe")
+    script = root / "probe.py"
+    script.write_text(
+        "import os\n"
+        "import time\n"
+        "from pathlib import Path\n"
+        "token = os.environ.get('MAILDESK_UPDATE_HEALTH_TOKEN', '')\n"
+        "target = os.environ.get('MAILDESK_UPDATE_HEALTH_FILE', '')\n"
+        "if not token or not target:\n"
+        "    raise SystemExit(7)\n"
+        "marker = Path(target)\n"
+        "marker.write_text(token, encoding='utf-8')\n"
+        "deadline = time.monotonic() + 10\n"
+        "while marker.exists() and time.monotonic() < deadline:\n"
+        "    time.sleep(0.1)\n",
         encoding="utf-8",
     )
-    environment = os.environ.copy()
-    environment["MAILDESK_TEST_PROBE_SOURCE"] = str(source)
-    environment["MAILDESK_TEST_PROBE_OUTPUT"] = str(path)
     completed = subprocess.run(
         [
-            "powershell.exe",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            "$ErrorActionPreference = 'Stop'; "
-            "Add-Type -Path $env:MAILDESK_TEST_PROBE_SOURCE "
-            "-OutputAssembly $env:MAILDESK_TEST_PROBE_OUTPUT "
-            "-OutputType ConsoleApplication",
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            "--noconfirm",
+            "--onefile",
+            "--name",
+            "MailDesk",
+            "--distpath",
+            str(root / "dist"),
+            "--workpath",
+            str(root / "work"),
+            "--specpath",
+            str(root),
+            "--log-level",
+            "ERROR",
+            str(script),
         ],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=180,
         check=False,
-        env=environment,
     )
-    if completed.returncode != 0 or not path.is_file():
+    executable = root / "dist" / "MailDesk.exe"
+    if completed.returncode != 0 or not executable.is_file():
         diagnostics = "\n".join(
             output.strip() for output in (completed.stdout, completed.stderr) if output
         )
-        raise AssertionError(f"Unable to compile update probe: {diagnostics}")
+        raise AssertionError(f"Unable to package update probe: {diagnostics}")
+    return executable
 
 
 def _asset_url(name: str) -> str:
@@ -715,6 +726,7 @@ def test_installer_rejects_staging_inside_replaced_onedir(tmp_path: Path) -> Non
 def test_powershell_helper_replaces_or_rolls_back_real_temp_files(
     tmp_path: Path,
     healthy: bool,
+    packaged_update_health_probe: Path,
 ) -> None:
     archive = _zip_payload(InstallMode.ONEFILE)
     update = _static_update(InstallMode.ONEFILE, archive)
@@ -722,13 +734,15 @@ def test_powershell_helper_replaces_or_rolls_back_real_temp_files(
     staging = service.updates_dir / "带 空格 staging"
     staging.mkdir(parents=True)
     source = staging / "MailDesk.exe"
-    _compile_update_health_probe(source, healthy=healthy)
+    system_directory = Path(os.environ.get("WINDIR", r"C:\Windows")) / "System32"
+    source_executable = (
+        packaged_update_health_probe if healthy else system_directory / "whoami.exe"
+    )
+    shutil.copy2(source_executable, source)
     expected_update = source.read_bytes()
     current = tmp_path / "当前 程序" / "MailDesk.exe"
     current.parent.mkdir(parents=True)
-    system_executable = Path(os.environ.get("WINDIR", r"C:\Windows")) / (
-        "System32/where.exe"
-    )
+    system_executable = system_directory / "where.exe"
     shutil.copy2(system_executable, current)
     original = current.read_bytes()
     staged = StagedUpdate(update=update, staging_root=staging, source_path=source)
@@ -756,8 +770,12 @@ def test_powershell_helper_replaces_or_rolls_back_real_temp_files(
         service.release_update_lock()
         if parent.poll() is None:
             parent.terminate()
-        parent.wait(timeout=5)
-    return_code = helper.wait(timeout=30)
+        try:
+            parent.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            parent.kill()
+            parent.wait(timeout=5)
+    return_code = helper.wait(timeout=150)
 
     assert return_code == (0 if healthy else 1)
     assert plan.result_path is not None
