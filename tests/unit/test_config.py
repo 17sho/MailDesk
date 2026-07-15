@@ -160,6 +160,7 @@ def test_update_health_accepts_one_legacy_updater_handoff(
     tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "legacy-local"))
+    monkeypatch.setattr("mailbox_manager.app.platform.system", lambda: "Windows")
     portable = tmp_path / "portable"
     paths = AppPaths(
         root=portable / "MailDesk Data",
