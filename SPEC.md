@@ -147,7 +147,7 @@ MailDesk/
    └─ integration/
 ```
 
-Windows 运行时数据默认位于 `%LOCALAPPDATA%\MailDesk`，macOS 位于 `~/Library/Application Support/MailDesk`，均不写入源码目录：
+冻结发行版的运行时数据位于程序或 `.app` 同级 `MailDesk Data`，更新事务位于同级 `.maildesk-update`；源码开发模式仍使用系统用户数据目录，均不写入源码目录：
 
 - `maildesk.db`：SQLite 数据库，秘密字段为密文。
 - `master.key.dpapi`：仅当前 Windows 用户可解密的随机主密钥。

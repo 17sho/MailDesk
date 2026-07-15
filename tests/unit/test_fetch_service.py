@@ -19,8 +19,10 @@ class FakeClient:
     def __init__(self, result: FetchResult) -> None:
         self.result = result
         self.closed = False
+        self.request: FetchRequest | None = None
 
-    def fetch_messages(self, _request: FetchRequest) -> FetchResult:
+    def fetch_messages(self, request: FetchRequest) -> FetchResult:
+        self.request = request
         return self.result
 
     def close(self) -> None:
@@ -60,6 +62,44 @@ def test_fetch_service_persists_messages_and_updates_account_status(tmp_path) ->
     assert client.closed is True
     assert accounts.get(stored.account_id).status is AccountStatus.SUCCESS  # type: ignore[arg-type]
     assert MessageRepository(database).list_for_account(stored.account_id)[0].subject == "验证码"  # type: ignore[arg-type]
+
+
+def test_fetch_service_passes_persisted_transport_ids_to_client(tmp_path) -> None:
+    database = Database(tmp_path / "incremental.db")
+    database.initialize()
+    accounts = AccountRepository(database, CredentialCipher.from_raw_key(b"I" * 32))
+    accounts.add_many(
+        [
+            EmailAccount(
+                email="incremental@example.com",
+                provider="custom",
+                protocol=ProtocolType.IMAP,
+                host="imap.example.com",
+                port=993,
+                secret="secret",
+            )
+        ]
+    )
+    stored = accounts.list_all()[0]
+    assert stored.account_id is not None
+    messages = MessageRepository(database)
+    messages.add_many(
+        stored.account_id,
+        (
+            MailMessage(
+                provider_message_id="provider-42",
+                transport_id="42",
+                folder="INBOX",
+            ),
+        ),
+    )
+    client = FakeClient(FetchResult(AccountStatus.SUCCESS))
+    service = FetchService(accounts, messages, client_factory=lambda _account: client)
+
+    service.fetch_account(stored, FetchRequest())
+
+    assert client.request is not None
+    assert client.request.known_transport_ids == frozenset({("INBOX", "42")})
 
 
 def test_fetch_service_persists_failure_status_without_messages(tmp_path) -> None:

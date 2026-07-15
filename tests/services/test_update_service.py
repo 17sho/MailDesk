@@ -960,6 +960,58 @@ def test_powershell_helper_rolls_back_an_onedir_start_failure(tmp_path: Path) ->
     assert plan.incoming_path is not None and not plan.incoming_path.exists()
 
 
+@pytest.mark.skipif(os.name != "nt", reason="PowerShell updater is Windows-only")
+def test_powershell_helper_updates_onedir_without_touching_sibling_user_data(
+    tmp_path: Path,
+    packaged_update_health_probe: Path,
+) -> None:
+    archive = _zip_payload(InstallMode.ONEDIR)
+    update = _static_update(InstallMode.ONEDIR, archive)
+    portable = tmp_path / "便携 MailDesk"
+    service = _service(
+        portable / ".maildesk-update",
+        lambda request: None,
+        mode=InstallMode.ONEDIR,
+    )
+    staging = service.updates_dir / "staged onedir"
+    source = staging / "MailDesk"
+    (source / "_internal").mkdir(parents=True)
+    shutil.copy2(packaged_update_health_probe, source / "MailDesk.exe")
+    (source / "_internal" / "new-runtime.txt").write_text("new", encoding="utf-8")
+    expected_executable = (source / "MailDesk.exe").read_bytes()
+
+    current = portable / "MailDesk" / "MailDesk.exe"
+    (current.parent / "_internal").mkdir(parents=True)
+    current.write_bytes(b"old executable")
+    (current.parent / "_internal" / "old-runtime.txt").write_text(
+        "old", encoding="utf-8"
+    )
+    user_database = portable / "MailDesk Data" / "maildesk.db"
+    user_database.parent.mkdir(parents=True)
+    user_database.write_bytes(b"user data must survive")
+
+    parent = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-Command", "Start-Sleep -Seconds 30"]
+    )
+    plan = service.create_installer_plan(
+        StagedUpdate(update, staging, source),
+        executable_path=current,
+        parent_pid=parent.pid,
+    )
+    helper = service.launch_installer(plan)
+    service.release_update_lock()
+    parent.terminate()
+    parent.wait(timeout=5)
+
+    assert helper.wait(timeout=150) == 0
+    assert current.read_bytes() == expected_executable
+    assert (current.parent / "_internal" / "new-runtime.txt").read_text() == "new"
+    assert not (current.parent / "_internal" / "old-runtime.txt").exists()
+    assert user_database.read_bytes() == b"user data must survive"
+    assert plan.result_path is not None
+    assert plan.result_path.read_text(encoding="utf-8-sig").strip() == "success"
+
+
 @pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS symlinks")
 def test_stage_valid_macos_app_preserves_relative_symlinks(tmp_path: Path) -> None:
     archive = _macos_zip_payload()

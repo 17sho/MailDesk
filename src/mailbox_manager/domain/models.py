@@ -158,6 +158,9 @@ class FetchRequest:
     post_action: PostAction = PostAction.NONE
     action_target_folder: str = ""
     confirmed_actions: bool = False
+    # Provider transport identifiers already persisted for this account.  Folder
+    # is part of the key because IMAP UIDs are only unique within one mailbox.
+    known_transport_ids: frozenset[tuple[str, str]] = frozenset()
 
     def __post_init__(self) -> None:
         if self.max_messages < 0:

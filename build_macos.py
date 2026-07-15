@@ -33,6 +33,60 @@ _ICON_SPECS = (
 _QTWEBENGINE_FRAMEWORK_PREFIX = (
     "PySide6/Qt/lib/QtWebEngineCore.framework/Versions/Resources/"
 )
+_MACOS_QT_FRAMEWORKS = frozenset(
+    {
+        "qtcharts",
+        "qtcore",
+        "qtgui",
+        "qtnetwork",
+        "qtopengl",
+        "qtopenglwidgets",
+        "qtpositioning",
+        "qtprintsupport",
+        "qtqml",
+        "qtqmlmeta",
+        "qtqmlmodels",
+        "qtqmlworkerscript",
+        "qtquick",
+        "qtquickwidgets",
+        "qtsvg",
+        "qtwebchannel",
+        "qtwebenginecore",
+        "qtwebenginewidgets",
+        "qtwidgets",
+    }
+)
+_MACOS_QT_BINDINGS = frozenset(
+    {
+        "qtcharts",
+        "qtcore",
+        "qtgui",
+        "qtnetwork",
+        "qtprintsupport",
+        "qtsvg",
+        "qtwebchannel",
+        "qtwebenginecore",
+        "qtwebenginewidgets",
+        "qtwidgets",
+    }
+)
+
+
+def should_include_macos_qt_payload(destination: str) -> bool:
+    """Keep only Qt frameworks and Python bindings required by MailDesk."""
+
+    normalized = destination.replace("\\", "/").casefold()
+    if not normalized.startswith("pyside6/"):
+        return True
+    parts = normalized.split("/")
+    for part in parts:
+        if part.endswith(".framework"):
+            return part.removesuffix(".framework") in _MACOS_QT_FRAMEWORKS
+    filename = parts[-1]
+    if filename.endswith((".abi3.so", ".so")) and filename.startswith("qt"):
+        module = filename.split(".", 1)[0]
+        return module in _MACOS_QT_BINDINGS
+    return True
 
 
 def repair_qtwebengine_framework_destination(destination: str) -> str:

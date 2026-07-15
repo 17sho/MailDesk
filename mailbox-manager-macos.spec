@@ -6,7 +6,10 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
 from build import should_include_qt_payload
-from build_macos import repair_qtwebengine_framework_destination
+from build_macos import (
+    repair_qtwebengine_framework_destination,
+    should_include_macos_qt_payload,
+)
 
 ROOT = Path(SPECPATH)
 with (ROOT / "pyproject.toml").open("rb") as stream:
@@ -35,10 +38,16 @@ analysis = Analysis(
     optimize=1,
 )
 analysis.binaries = [
-    entry for entry in analysis.binaries if should_include_qt_payload(entry[0])
+    entry
+    for entry in analysis.binaries
+    if should_include_qt_payload(entry[0])
+    and should_include_macos_qt_payload(entry[0])
 ]
 analysis.datas = [
-    entry for entry in analysis.datas if should_include_qt_payload(entry[0])
+    entry
+    for entry in analysis.datas
+    if should_include_qt_payload(entry[0])
+    and should_include_macos_qt_payload(entry[0])
 ]
 analysis.binaries = [
     (repair_qtwebengine_framework_destination(destination), source, kind)

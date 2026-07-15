@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maildesk"
-version = "0.3.8"
+version = "0.3.9"
 description = "Windows and macOS desktop mailbox manager"
 readme = "README.md"
 license = "MIT"

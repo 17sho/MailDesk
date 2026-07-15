@@ -409,11 +409,16 @@ class MessageRepository:
                 connection.execute(
                     """
                     INSERT INTO messages (
-                        account_id, provider_message_id, folder, subject, sender, sender_name,
+                        account_id, provider_message_id, transport_id, folder,
+                        subject, sender, sender_name,
                         recipients_json, catch_all_recipient, received_at, text_body,
                         html_body, web_html_body, matched_values_json, eml_path, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(account_id, provider_message_id, folder) DO UPDATE SET
+                        transport_id = CASE
+                            WHEN excluded.transport_id <> '' THEN excluded.transport_id
+                            ELSE messages.transport_id
+                        END,
                         subject = excluded.subject,
                         sender = excluded.sender,
                         sender_name = excluded.sender_name,
@@ -438,6 +443,7 @@ class MessageRepository:
                     (
                         account_id,
                         message.provider_message_id,
+                        message.transport_id,
                         message.folder,
                         message.subject[:2000],
                         message.sender,
@@ -468,6 +474,21 @@ class MessageRepository:
                     )
                 inserted += int(existing is None)
         return inserted
+
+    def known_transport_ids(self, account_id: int) -> frozenset[tuple[str, str]]:
+        """Return provider IDs used to avoid downloading cached messages again."""
+
+        if account_id <= 0:
+            return frozenset()
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT folder, transport_id FROM messages
+                WHERE account_id = ? AND transport_id <> ''
+                """,
+                (account_id,),
+            ).fetchall()
+        return frozenset((str(row["folder"]), str(row["transport_id"])) for row in rows)
 
     def list_for_account(self, account_id: int, limit: int = 500) -> list[MailMessage]:
         bounded_limit = max(1, min(limit, 1000))
@@ -718,7 +739,9 @@ class MessageRepository:
             account_id=row["account_id"],  # type: ignore[index]
             provider_message_id=row["provider_message_id"],  # type: ignore[index]
             folder=row["folder"],  # type: ignore[index]
-            transport_id="",
+            transport_id=(
+                row["transport_id"] if "transport_id" in row_keys else ""  # type: ignore[index]
+            ),
             subject=row["subject"],  # type: ignore[index]
             sender=row["sender"],  # type: ignore[index]
             sender_name=(

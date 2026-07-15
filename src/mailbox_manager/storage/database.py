@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY,
     account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     provider_message_id TEXT NOT NULL,
+    transport_id TEXT NOT NULL DEFAULT '',
     folder TEXT NOT NULL,
     subject TEXT NOT NULL DEFAULT '',
     sender TEXT NOT NULL DEFAULT '',
@@ -172,6 +173,7 @@ ACCOUNT_COLUMNS: dict[str, str] = {
 }
 
 MESSAGE_COLUMNS: dict[str, str] = {
+    "transport_id": "TEXT NOT NULL DEFAULT ''",
     "sender_name": "TEXT NOT NULL DEFAULT ''",
     "html_body": "TEXT NOT NULL DEFAULT ''",
     "web_html_body": "TEXT NOT NULL DEFAULT ''",
@@ -217,6 +219,10 @@ class Database:
             for name, definition in MESSAGE_COLUMNS.items():
                 if name not in message_columns:
                     connection.execute(f'ALTER TABLE messages ADD COLUMN "{name}" {definition}')
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_messages_transport "
+                "ON messages(account_id, folder, transport_id)"
+            )
             proxy_columns = {
                 row["name"] for row in connection.execute("PRAGMA table_info(proxies)")
             }
@@ -226,4 +232,4 @@ class Database:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_proxies_default ON proxies(is_default DESC, id)"
             )
-            connection.execute("PRAGMA user_version = 7")
+            connection.execute("PRAGMA user_version = 8")

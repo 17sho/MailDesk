@@ -302,11 +302,38 @@ ProgressCallback = Callable[[int, int | None], None]
 CancelCallback = Callable[[], bool]
 
 
+def _read_diagnostic_tail(*paths: Path | None) -> str:
+    """Return a small, user-displayable tail from updater diagnostics."""
+
+    for path in paths:
+        if path is None or not path.is_file():
+            continue
+        try:
+            with path.open("rb") as stream:
+                stream.seek(0, os.SEEK_END)
+                size = stream.tell()
+                stream.seek(max(0, size - 4096))
+                text = stream.read(4096).decode("utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if lines:
+            return "安装助手信息：" + " | ".join(lines[-6:])
+    return ""
+
+
 def consume_install_result(updates_dir: Path) -> str | None:
     """Return one unseen helper result while retaining a small diagnostic history."""
 
     root = Path(updates_dir)
     try:
+        diagnostics = sorted(
+            root.glob("updater-launch-*.log"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+        for obsolete in diagnostics[5:]:
+            obsolete.unlink(missing_ok=True)
         pending = sorted(
             root.glob("install-result-*.log"),
             key=lambda path: path.stat().st_mtime_ns,
@@ -1150,24 +1177,47 @@ class UpdateService:
 
         creation_flags = 0
         if os.name == "nt":
+            # PowerShell can silently exit without executing -File when started
+            # with DETACHED_PROCESS.  CREATE_NO_WINDOW remains alive after the GUI
+            # exits and is verified below through the ready-token handshake.
             creation_flags = subprocess.CREATE_NO_WINDOW
         environment = os.environ.copy()
         for key in tuple(environment):
             if key.casefold() == "psmodulepath":
                 environment.pop(key, None)
+        diagnostic_path = (
+            plan.result_path.parent / f"updater-launch-{plan.health_token}.log"
+            if plan.result_path is not None
+            else plan.script_path.with_suffix(".launch.log")
+        )
+        diagnostic_stream: BinaryIO | None = None
         try:
+            diagnostic_path.parent.mkdir(parents=True, exist_ok=True)
+            diagnostic_path.write_text(
+                "MailDesk updater hand-off\n"
+                f"source={plan.source_path}\n"
+                f"target={plan.target_path}\n",
+                encoding="utf-8",
+            )
+            diagnostic_stream = diagnostic_path.open("ab", buffering=0)
             process = subprocess.Popen(
                 plan.command,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=diagnostic_stream,
+                stderr=subprocess.STDOUT,
                 close_fds=True,
                 creationflags=creation_flags,
+                start_new_session=os.name != "nt",
                 env=environment,
             )
         except OSError as exc:
             self.release_update_lock()
-            raise UpdateError("无法启动更新安装程序") from exc
+            raise UpdateError(
+                f"无法启动更新安装程序。诊断日志：{diagnostic_path}"
+            ) from exc
+        finally:
+            if diagnostic_stream is not None:
+                diagnostic_stream.close()
         if plan.ready_path is None or not plan.health_token:
             return process
         deadline = time.monotonic() + 8.0
@@ -1184,7 +1234,12 @@ class UpdateService:
         with suppress(OSError):
             process.terminate()
         self.release_update_lock()
-        raise UpdateError("更新安装程序未能安全接管，当前版本将继续运行")
+        detail = _read_diagnostic_tail(plan.result_path, diagnostic_path)
+        suffix = f"\n{detail}" if detail else ""
+        raise UpdateError(
+            "更新安装程序未能安全接管，当前版本将继续运行。"
+            f"\n诊断日志：{diagnostic_path}{suffix}"
+        )
 
     def _fetch_signed_manifest(
         self,

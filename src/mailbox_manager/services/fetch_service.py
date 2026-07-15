@@ -106,7 +106,17 @@ class FetchService:
                     client = route_factory.create_for_route(account, route)
                 else:
                     client = self._client_factory(account)
-                result = client.fetch_messages(request)
+                known_lookup = getattr(self._messages, "known_transport_ids", None)
+                known_transport_ids = (
+                    known_lookup(account.account_id)
+                    if callable(known_lookup)
+                    else frozenset()
+                )
+                incremental_request = replace(
+                    request,
+                    known_transport_ids=known_transport_ids,
+                )
+                result = client.fetch_messages(incremental_request)
             if result.messages and self._eml_store is not None:
                 stored_messages = tuple(
                     replace(

@@ -145,6 +145,44 @@ def test_imap_client_batches_message_download_round_trips() -> None:
     assert fake.fetch_calls == 3
 
 
+def test_imap_client_does_not_download_known_uids_again() -> None:
+    class IncrementalImap(FakeImap):
+        def __init__(self) -> None:
+            super().__init__()
+            self.downloaded: list[bytes] = []
+
+        def uid(self, command: str, *args):
+            if command.casefold() == "search":
+                return "OK", [b"40 41 42"]
+            self.downloaded.extend(args[0].split(b","))
+            responses = []
+            for identifier in args[0].split(b","):
+                raw = (
+                    b"Subject: new "
+                    + identifier
+                    + b"\r\nMessage-ID: <new-"
+                    + identifier
+                    + b"@example.com>\r\n\r\nBody"
+                )
+                responses.append((b"1 (UID " + identifier + b" RFC822)", raw))
+            return "OK", responses
+
+    fake = IncrementalImap()
+    result = ImapClient(
+        _imap_account(), connection_factory=lambda *_args, **_kwargs: fake
+    ).fetch_messages(
+        FetchRequest(
+            max_messages=20,
+            known_transport_ids=frozenset(
+                {("INBOX", "40"), ("INBOX", "42")}
+            ),
+        )
+    )
+
+    assert [message.transport_id for message in result.messages] == ["41"]
+    assert fake.downloaded == [b"41"]
+
+
 def test_imap_client_reconnects_once_after_transient_download_timeout() -> None:
     created: list[FakeImap] = []
 
@@ -413,6 +451,54 @@ def test_graph_zero_limit_follows_all_pagination_links() -> None:
 
     assert [message.subject for message in result.messages] == ["page-1", "page-2"]
     assert page_calls == 2
+
+
+def test_graph_client_skips_cached_message_body_work_and_older_pages() -> None:
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "oauth2" in request.url.path:
+            return httpx.Response(200, json={"access_token": "access"})
+        requested_paths.append(request.url.path)
+        if request.url.path.endswith("/attachments"):
+            raise AssertionError("cached messages must not request attachments")
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    {
+                        "id": "cached-id",
+                        "subject": "cached",
+                        "hasAttachments": True,
+                        "body": {"contentType": "html", "content": '<img src="cid:x">'},
+                    }
+                ],
+                "@odata.nextLink": (
+                    "https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages"
+                    "?$skiptoken=older"
+                ),
+            },
+        )
+
+    account = EmailAccount(
+        email="owner@outlook.com",
+        provider="Outlook",
+        protocol=ProtocolType.GRAPH,
+        refresh_token="refresh",
+        client_id="00000000-0000-0000-0000-000000000001",
+    )
+    result = OutlookGraphClient(
+        account, transport=httpx.MockTransport(handler)
+    ).fetch_messages(
+        FetchRequest(
+            max_messages=20,
+            known_transport_ids=frozenset({("INBOX", "cached-id")}),
+        )
+    )
+
+    assert result.status is AccountStatus.SUCCESS
+    assert result.messages == ()
+    assert requested_paths == ["/v1.0/me/mailFolders/inbox/messages"]
 
 
 def test_graph_client_maps_rate_limit_without_leaking_response() -> None:

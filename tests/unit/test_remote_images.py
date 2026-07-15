@@ -54,3 +54,22 @@ def test_remote_image_redirect_is_revalidated_against_ssrf(monkeypatch) -> None:
         result = remote_images._download_image(client, "https://public.example/image.png")
 
     assert result is None
+
+
+def test_remote_image_uses_file_signature_when_server_mime_is_wrong(monkeypatch) -> None:
+    monkeypatch.setattr(remote_images, "_is_safe_url", lambda url: True)
+    png = b"\x89PNG\r\n\x1a\n" + b"payload"
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(
+            200,
+            headers={"content-type": "application/octet-stream"},
+            content=png,
+            request=request,
+        )
+    )
+    with httpx.Client(transport=transport) as client:
+        result = remote_images._download_image(
+            client, "https://images.example.com/no-extension"
+        )
+
+    assert result == ("image/png", png)

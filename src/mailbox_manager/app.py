@@ -5,6 +5,7 @@ import os
 import platform
 import re
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 from PySide6.QtCore import QLibraryInfo, QLocale, QLockFile, QTimer, QTranslator
@@ -12,7 +13,12 @@ from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from mailbox_manager import __version__
-from mailbox_manager.config import AppPaths
+from mailbox_manager.config import (
+    AppPaths,
+    cleanup_deferred_legacy_data,
+    legacy_data_root,
+    migrate_legacy_data,
+)
 from mailbox_manager.gui.main_window import MainWindow
 from mailbox_manager.gui.modern_style import install_modern_style
 from mailbox_manager.observability.logging_config import configure_logging
@@ -142,13 +148,19 @@ def report_update_health(paths: AppPaths) -> bool:
         raise ValueError("更新健康检查参数无效")
     health_path = Path(raw_path).resolve()
     updates_root = paths.updates.resolve()
+    legacy_updates_root = (
+        legacy_data_root(system=platform.system(), home=Path.home()) / "updates"
+    ).resolve()
     if (
         os.path.normcase(str(health_path.parent))
-        != os.path.normcase(str(updates_root))
+        not in {
+            os.path.normcase(str(updates_root)),
+            os.path.normcase(str(legacy_updates_root)),
+        }
         or not health_path.name.startswith(".health-")
     ):
         raise ValueError("更新健康检查路径无效")
-    updates_root.mkdir(parents=True, exist_ok=True)
+    health_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = health_path.with_name(f"{health_path.name}.{os.getpid()}.tmp")
     temporary.write_text(token, encoding="utf-8", newline="")
     temporary.replace(health_path)
@@ -163,6 +175,28 @@ def acquire_instance_lock(paths: AppPaths) -> QLockFile | None:
     if not lock.tryLock(100):
         return None
     return lock
+
+
+def migrate_legacy_data_for_startup(
+    paths: AppPaths, *, defer_legacy_cleanup: bool = False
+) -> bool:
+    """Move legacy profile data only while no older MailDesk process owns it."""
+
+    legacy_root = legacy_data_root(system=platform.system(), home=Path.home()).resolve()
+    if legacy_root == paths.root.resolve() or not legacy_root.is_dir():
+        return False
+    legacy_lock = QLockFile(str(legacy_root / ".instance.lock"))
+    if not legacy_lock.tryLock(100):
+        raise RuntimeError("旧版 MailDesk 仍在运行，请先完全退出后再启动新版。")
+    try:
+        if paths.database.exists():
+            return cleanup_deferred_legacy_data(paths)
+        return migrate_legacy_data(
+            paths,
+            defer_legacy_cleanup=defer_legacy_cleanup,
+        )
+    finally:
+        legacy_lock.unlock()
 
 
 def schedule_startup_probe(
@@ -198,7 +232,41 @@ def run() -> int:
     if icon_path.exists():
         application.setWindowIcon(QIcon(str(icon_path)))
     paths = AppPaths.for_current_user()
+    legacy_updates = (
+        legacy_data_root(system=platform.system(), home=Path.home()) / "updates"
+    ).resolve()
+    raw_health_path = os.environ.get("MAILDESK_UPDATE_HEALTH_FILE", "").strip()
+    legacy_update_handoff = False
+    if raw_health_path:
+        with suppress(OSError):
+            legacy_update_handoff = Path(raw_health_path).resolve().parent == legacy_updates
+    try:
+        health_reported = report_update_health(paths)
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "MailDesk 更新启动失败",
+            f"无法向安装助手确认新版已安全启动。\n\n{exc}",
+        )
+        return 1
+    try:
+        migrated = migrate_legacy_data_for_startup(
+            paths,
+            defer_legacy_cleanup=legacy_update_handoff and health_reported,
+        )
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "MailDesk 数据迁移失败",
+            f"无法把旧版用户数据安全迁移到程序所在目录。\n\n{exc}\n\n"
+            "原数据没有被覆盖，请退出其他 MailDesk 进程后重试。",
+        )
+        return 1
     logger = configure_logging(paths.logs)
+    if migrated:
+        logger.info("Legacy MailDesk data migrated to %s", paths.root)
+    if health_reported:
+        logger.info("MailDesk update startup health check passed")
     instance_lock = acquire_instance_lock(paths)
     if instance_lock is None:
         logger.warning("MailDesk startup blocked because another instance is active")
@@ -236,11 +304,6 @@ def run() -> int:
         tray.show()
     window.show()
     schedule_startup_probe(window, logger)
-    try:
-        if report_update_health(paths):
-            logger.info("MailDesk update startup health check passed")
-    except Exception:
-        logger.exception("Unable to report update startup health")
     install_result = consume_install_result(paths.updates)
     if install_result and install_result != "success":
         logger.error("Previous MailDesk update result: %s", install_result)

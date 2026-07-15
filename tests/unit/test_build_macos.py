@@ -4,6 +4,7 @@ from build_macos import (
     macos_asset_basename,
     normalize_macos_arch,
     repair_qtwebengine_framework_destination,
+    should_include_macos_qt_payload,
 )
 
 
@@ -46,3 +47,20 @@ def test_leaves_other_framework_destinations_unchanged() -> None:
     destination = "PySide6/Qt/lib/QtCore.framework/Versions/A/QtCore"
 
     assert repair_qtwebengine_framework_destination(destination) == destination
+
+
+def test_macos_payload_filter_keeps_reader_frameworks_and_drops_large_extras() -> None:
+    assert should_include_macos_qt_payload(
+        "PySide6/Qt/lib/QtWebEngineCore.framework/Versions/A/QtWebEngineCore"
+    )
+    assert should_include_macos_qt_payload(
+        "PySide6/Qt/lib/QtQuick.framework/Versions/A/QtQuick"
+    )
+    assert should_include_macos_qt_payload("PySide6/QtWebEngineWidgets.abi3.so")
+    assert not should_include_macos_qt_payload(
+        "PySide6/Qt/lib/QtMultimedia.framework/Versions/A/QtMultimedia"
+    )
+    assert not should_include_macos_qt_payload(
+        "PySide6/Qt/lib/QtPdf.framework/Versions/A/QtPdf"
+    )
+    assert not should_include_macos_qt_payload("PySide6/Qt3DCore.abi3.so")

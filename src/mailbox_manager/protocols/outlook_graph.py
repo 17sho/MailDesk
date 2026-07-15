@@ -190,8 +190,13 @@ class OutlookGraphClient(EmailClientBase):
                         else None,
                     )
                     first_page = False
+                    page_had_known_message = False
                     for item in payload.get("value", []):
                         if isinstance(item, dict):
+                            message_id = str(item.get("id", ""))
+                            if (folder_label, message_id) in request.known_transport_ids:
+                                page_had_known_message = True
+                                continue
                             message = self._parse_item(item, folder_label, request)
                             messages.append(message)
                             if (
@@ -208,6 +213,10 @@ class OutlookGraphClient(EmailClientBase):
                                 remaining -= 1
                                 if remaining <= 0:
                                     break
+                    # Graph returns newest-first. Once cached mail appears, older
+                    # pages need no body parsing or attachment requests.
+                    if page_had_known_message:
+                        break
                     next_link = payload.get("@odata.nextLink")
                     url = (
                         next_link

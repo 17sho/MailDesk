@@ -88,8 +88,15 @@ class Pop3Client(EmailClientBase):
         try:
             connection = self._connect()
             count, _size = connection.stat()
-            first = 1 if request.unlimited else max(1, count - request.max_messages + 1)
-            for number in range(count, first - 1, -1):
+            identifiers = _pop_transport_ids(connection, count)
+            candidates = [
+                (number, transport_id)
+                for number, transport_id in reversed(identifiers)
+                if ("INBOX", transport_id) not in request.known_transport_ids
+            ]
+            if not request.unlimited:
+                candidates = candidates[: request.max_messages]
+            for number, transport_id in candidates:
                 _status, lines, _octets = connection.retr(number)
                 raw = b"\r\n".join(lines) + b"\r\n"
                 message = replace(
@@ -99,8 +106,10 @@ class Pop3Client(EmailClientBase):
                         keywords=request.keywords,
                         custom_pattern=request.custom_pattern,
                     ),
-                    transport_id=str(number),
+                    transport_id=transport_id,
                 )
+                if not request.include_raw:
+                    message = replace(message, raw_eml=b"")
                 messages.append(message)
                 if (
                     message.matched_values
@@ -118,6 +127,23 @@ class Pop3Client(EmailClientBase):
         if connection is not None:
             with suppress(poplib.error_proto, OSError):
                 connection.quit()
+
+
+def _pop_transport_ids(connection: PopConnection, count: int) -> list[tuple[int, str]]:
+    """Prefer stable POP3 UIDL values and fall back to session message numbers."""
+
+    try:
+        _status, rows, _octets = connection.uidl()
+        parsed: list[tuple[int, str]] = []
+        for row in rows:
+            parts = row.decode("ascii", errors="ignore").split()
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1]:
+                parsed.append((int(parts[0]), parts[1]))
+        if parsed:
+            return parsed
+    except (AttributeError, OSError, poplib.error_proto):
+        pass
+    return [(number, str(number)) for number in range(1, count + 1)]
 
 
 def _classify_pop_error(exc: Exception) -> tuple[AccountStatus, str]:

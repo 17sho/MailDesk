@@ -184,6 +184,16 @@ class ImapClient(EmailClientBase):
             if status != "OK" or not search_data:
                 continue
             identifiers = search_data[0].split()
+            known_identifiers = {
+                transport_id
+                for known_folder, transport_id in request.known_transport_ids
+                if known_folder.casefold() == folder.casefold()
+            }
+            identifiers = [
+                identifier
+                for identifier in identifiers
+                if _uid_text(identifier) not in known_identifiers
+            ]
             if remaining is not None:
                 identifiers = identifiers[-remaining:]
             newest_first = list(reversed(identifiers))

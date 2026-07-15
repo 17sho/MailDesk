@@ -4,6 +4,7 @@ import base64
 import logging
 import threading
 from collections import Counter
+from dataclasses import replace
 from html import escape as html_escape
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -298,6 +299,10 @@ class MainWindow(QMainWindow):
             translation_values.get("dashboard_quick_actions")
         )
         self._pool = QThreadPool(self)
+        # Updating must never wait behind 50 slow IMAP jobs.  A dedicated serial
+        # pool makes the confirm -> verify -> external-helper hand-off immediate.
+        self._update_pool = QThreadPool(self)
+        self._update_pool.setMaxThreadCount(1)
         self._stop_event = threading.Event()
         self._fetch_stop_requested = False
         self._workers: dict[int, FetchWorker] = {}
@@ -1874,7 +1879,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "收件设置无效", str(exc))
             return
-        self._queue_fetch([account], request)
+        self._queue_fetch([account], replace(request, max_messages=1))
 
     def _queue_fetch(
         self, accounts: list[EmailAccount], request: FetchRequest
@@ -1925,6 +1930,7 @@ class MainWindow(QMainWindow):
             max_messages=int(values.get("max_messages", 20)),
             keywords=keywords,
             custom_pattern=str(values.get("extract_pattern", "")),
+            include_raw=bool(values.get("save_eml", False)),
             include_special_folders=bool(values.get("include_special", False)),
             post_action=PostAction(str(values.get("post_action", PostAction.NONE.value))),
             action_target_folder=str(values.get("action_target", "")),
@@ -3170,7 +3176,7 @@ class MainWindow(QMainWindow):
         self._update_check_worker = worker
         worker.signals.result.connect(self._on_update_check_result)
         worker.signals.finished.connect(self._on_update_check_finished)
-        self._pool.start(worker)
+        self._update_pool.start(worker)
         if manual:
             self.statusBar().showMessage("正在检查新版本…")
 
@@ -3330,7 +3336,7 @@ class MainWindow(QMainWindow):
             self._update_dialog.set_downloading()
         self.check_updates_action.setEnabled(False)
         self._set_update_button_state("downloading", 0)
-        self._pool.start(worker)
+        self._update_pool.start(worker)
 
     def _on_update_download_progress(
         self, operation_id: str, received: int, total: object
@@ -3439,17 +3445,31 @@ class MainWindow(QMainWindow):
         staged = self._staged_update
         dialog = self._update_dialog
         if service is None or staged is None:
+            logging.getLogger("maildesk.update").warning(
+                "Install request rejected because no verified staged update exists"
+            )
             if dialog is not None:
                 dialog.set_download_error("更新尚未准备完成，请重新下载。")
+                dialog.show()
+            self.statusBar().showMessage("更新尚未准备完成，请重新下载", 6000)
             return
         if (
             version.strip().removeprefix("v") != staged.update.release.version
             or self._update_identity(staged.update) != self._update_download_identity
         ):
+            logging.getLogger("maildesk.update").warning(
+                "Install request rejected because the staged release identity changed"
+            )
             if dialog is not None:
                 dialog.set_download_error("更新版本状态已变化，请重新检查并下载。")
+                dialog.show()
+            self.statusBar().showMessage("更新版本状态已变化，请重新下载", 6000)
             return
         if self._update_install_worker is not None:
+            logging.getLogger("maildesk.update").info(
+                "Ignored duplicate install request while installer preparation is active"
+            )
+            self.statusBar().showMessage("正在准备安装，请稍候…", 4000)
             return
         answer = QMessageBox.question(
             self,
@@ -3459,7 +3479,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
-        if answer is not QMessageBox.StandardButton.Yes:
+        if answer != QMessageBox.StandardButton.Yes:
             if dialog is not None:
                 dialog.set_download_complete()
             return
@@ -3500,7 +3520,7 @@ class MainWindow(QMainWindow):
             "Preparing verified update installer from %s",
             staged.staging_root,
         )
-        self._pool.start(worker)
+        self._update_pool.start(worker)
 
     def _on_update_installer_status(self, message: str) -> None:
         logging.getLogger("maildesk.update").info("%s", message)
@@ -3516,6 +3536,10 @@ class MainWindow(QMainWindow):
         staged = self._staged_update
         dialog = self._update_dialog
         if service is None or staged is None:
+            logging.getLogger("maildesk.update").error(
+                "Installer result arrived after update state was cleared"
+            )
+            self.statusBar().showMessage("更新状态异常，请重新下载", 6000)
             return
         if error is not None:
             exc = error

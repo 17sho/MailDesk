@@ -52,6 +52,10 @@ jobs:
         shell: bash
         run: |
           test -x dist/MailDesk.app/Contents/MacOS/MailDesk
+          qt_lib="dist/MailDesk.app/Contents/Frameworks/PySide6/Qt/lib"
+          for unused in Qt3DCore QtMultimedia QtPdf QtVirtualKeyboard; do
+            test ! -d "$qt_lib/${unused}.framework"
+          done
           webengine_framework="dist/MailDesk.app/Contents/Frameworks/PySide6/Qt/lib/QtWebEngineCore.framework"
           test -x "$webengine_framework/Helpers/QtWebEngineProcess.app/Contents/MacOS/QtWebEngineProcess"
           test -f "$webengine_framework/Resources/icudtl.dat"
@@ -66,6 +70,7 @@ jobs:
           # before the real startup test can run.
           codesign --display --verbose=2 dist/MailDesk.app
           codesign --display --verbose=2 dist/MailDesk.app/Contents/MacOS/MailDesk
+          du -sh dist/MailDesk.app
       - name: Isolated startup smoke test
         shell: bash
         run: |
@@ -126,6 +131,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$stage" "$output/${base}.zip"
           ln -s /Applications "$stage/Applications"
           hdiutil create -volname "MailDesk" -srcfolder "$stage" -ov -format UDZO "$output/${base}.dmg"
+          du -h "$output/${base}.zip" "$output/${base}.dmg"
           (
             cd "$output"
             shasum -a 256 "${base}.zip" "${base}.dmg" >"SHA256SUMS-${{ matrix.asset_arch }}.txt"
