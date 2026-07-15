@@ -1,0 +1,48 @@
+name: Publish macOS Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Successful macOS Build workflow run id
+        required: true
+        type: string
+      tag:
+        description: Existing draft release tag
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ inputs.run_id }}
+      RELEASE_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Transfer verified macOS artifacts to draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p macos-assets
+          for arch in arm64 x64; do
+            artifact_id="$(
+              gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts" \
+                --jq ".artifacts[] | select(.name == \"macos-${arch}\") | .id"
+            )"
+            test -n "$artifact_id"
+            gh api \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              > "artifact-${arch}.zip"
+            unzip -q "artifact-${arch}.zip" -d "artifact-${arch}"
+            cp "artifact-${arch}/MailDesk-${RELEASE_TAG}-macos-${arch}.zip" macos-assets/
+            cp "artifact-${arch}/MailDesk-${RELEASE_TAG}-macos-${arch}.dmg" macos-assets/
+          done
+          gh release upload "$RELEASE_TAG" macos-assets/* --clobber
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[] | [.name, .size] | @tsv'
