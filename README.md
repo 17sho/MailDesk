@@ -371,7 +371,7 @@ macOS 包必须在真实 macOS 环境构建。安装开发依赖后运行：
 .venv/bin/python build_macos.py --clean
 ```
 
-输出为 `dist/MailDesk.app`。GitHub 的 [`macos-release.yml`](.github/workflows/macos-release.yml) 会在 arm64 与 Intel Runner 上分别执行测试、构建、代码签名结构校验、隔离启动测试，并生成 DMG/ZIP。完整步骤见 [`docs/MACOS.md`](docs/MACOS.md)。
+输出为 `dist/MailDesk.app`。GitHub 的 [`macos-release.yml`](.github/workflows/macos-release.yml) 会在 arm64 与 Intel Runner 上分别执行测试、构建、应用封装与入口签名校验、隔离启动测试，并生成 DMG/ZIP。完整步骤见 [`docs/MACOS.md`](docs/MACOS.md)。
 
 ## 项目结构
 
