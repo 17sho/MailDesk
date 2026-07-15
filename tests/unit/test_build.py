@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from build import ensure_icon, validate_mode
+from build import ensure_icon, should_include_qt_payload, validate_mode
 from build_macos import macos_asset_basename, normalize_macos_arch
 
 
@@ -25,6 +25,14 @@ def test_ensure_icon_renders_windows_ico_from_svg(tmp_path) -> None:
 def test_validate_mode_accepts_only_supported_pyinstaller_modes() -> None:
     assert validate_mode("onefile") == "onefile"
     assert validate_mode("onedir") == "onedir"
+
+
+def test_windows_build_excludes_unused_qml_payload_and_keeps_webengine() -> None:
+    assert not should_include_qt_payload(
+        "PySide6/qml/QtQuick/Controls/FluentWinUI3/dark/images/very-long-name.png"
+    )
+    assert should_include_qt_payload("PySide6/QtWebEngineWidgets.pyd")
+    assert should_include_qt_payload("PySide6/resources/qtwebengine_resources.pak")
 
 
 def test_macos_release_names_normalize_native_architectures() -> None:

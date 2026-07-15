@@ -24,6 +24,11 @@ def should_include_qt_payload(destination: str) -> bool:
 
     normalized = destination.replace("\\", "/").casefold()
     filename = normalized.rsplit("/", 1)[-1]
+    # MailDesk uses Qt Widgets, Qt Charts and QtWebEngineWidgets, not Qt Quick.
+    # Besides adding hundreds of megabytes, the QML style image hierarchy can
+    # exceed Windows MAX_PATH inside the verified updater staging directory.
+    if "pyside6/qml/" in normalized:
+        return False
     if "pyside6/resources/" in normalized and (
         ".debug." in filename
         or filename.startswith("qtwebengine_devtools_resources")

@@ -590,6 +590,7 @@ def test_stage_valid_release_layout(mode: InstallMode, tmp_path: Path) -> None:
     )
     assert executable.read_bytes().startswith(b"new")
     assert staged.staging_root.parent == service.updates_dir
+    assert staged.source_path.relative_to(staged.staging_root).parts[0] == "payload"
 
 
 @pytest.mark.parametrize(

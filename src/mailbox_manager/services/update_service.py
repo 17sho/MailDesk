@@ -769,12 +769,12 @@ class UpdateService:
                 f"MailDesk-v{update.release.version}-windows-x64-"
                 f"{update.install_mode.value}"
             )
-            relative_source = (
+            extracted_source = (
                 Path(prefix) / "MailDesk.exe"
                 if update.install_mode is InstallMode.ONEFILE
                 else Path(prefix) / "MailDesk"
             )
-            source = temporary_root / relative_source
+            source = temporary_root / extracted_source
             expected_executable = (
                 source
                 if update.install_mode is InstallMode.ONEFILE
@@ -791,6 +791,28 @@ class UpdateService:
                 and not (source / "_internal").is_dir()
             ):
                 raise UpdateSecurityError("更新包缺少 onedir 运行时目录")
+            # Normalize the install payload close to the staging root. Keeping
+            # the long release archive prefix here pushes Qt QML resource paths
+            # beyond legacy Windows MAX_PATH after the temporary directory is
+            # renamed, making unchanged files appear to have disappeared.
+            payload_root = temporary_root / "payload"
+            if payload_root.exists():
+                raise UpdateSecurityError("更新包包含冲突的暂存目录")
+            if update.install_mode is InstallMode.ONEFILE:
+                payload_root.mkdir()
+                source.replace(payload_root / "MailDesk.exe")
+                relative_source = Path("payload") / "MailDesk.exe"
+            else:
+                source.replace(payload_root)
+                relative_source = Path("payload")
+            source = temporary_root / relative_source
+            for child in tuple(temporary_root.iterdir()):
+                if child == payload_root:
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
             content_root = (
                 source.parent
                 if update.install_mode is InstallMode.ONEFILE
