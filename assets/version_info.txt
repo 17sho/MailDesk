@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 3, 2, 0),
-    prodvers=(0, 3, 2, 0),
+    filevers=(0, 3, 3, 0),
+    prodvers=(0, 3, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -17,12 +17,12 @@ VSVersionInfo(
           [
             StringStruct(u'CompanyName', u'MailDesk contributors'),
             StringStruct(u'FileDescription', u'MailDesk - Windows desktop mailbox manager'),
-            StringStruct(u'FileVersion', u'0.3.2.0'),
+            StringStruct(u'FileVersion', u'0.3.3.0'),
             StringStruct(u'InternalName', u'MailDesk'),
             StringStruct(u'LegalCopyright', u'Copyright (c) 2026 MailDesk contributors'),
             StringStruct(u'OriginalFilename', u'MailDesk.exe'),
             StringStruct(u'ProductName', u'MailDesk'),
-            StringStruct(u'ProductVersion', u'0.3.2.0')
+            StringStruct(u'ProductVersion', u'0.3.3.0')
           ]
         )
       ]

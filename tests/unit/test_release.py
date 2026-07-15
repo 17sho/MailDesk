@@ -116,6 +116,56 @@ def test_signed_update_manifest_binds_both_archives_and_verifies(tmp_path: Path)
     assert release.TRUSTED_UPDATE_PUBLIC_KEY_B64 == TRUSTED_UPDATE_PUBLIC_KEY_B64
 
 
+def test_signed_manifest_can_bind_synchronized_windows_and_macos_assets(
+    tmp_path: Path,
+) -> None:
+    version = "0.3.3"
+    names = (
+        f"MailDesk-v{version}-windows-x64-onefile.zip",
+        f"MailDesk-v{version}-windows-x64-onedir.zip",
+        f"MailDesk-v{version}-macos-arm64.zip",
+        f"MailDesk-v{version}-macos-x64.zip",
+        f"MailDesk-v{version}-macos-arm64.dmg",
+        f"MailDesk-v{version}-macos-x64.dmg",
+    )
+    assets = tuple(tmp_path / name for name in names)
+    for asset in assets:
+        asset.write_bytes(asset.name.encode("utf-8"))
+    private_key = Ed25519PrivateKey.generate()
+    key_path = tmp_path / "release-key.pem"
+    key_path.write_bytes(
+        private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+
+    manifest, _signature = release.build_signed_update_manifest(
+        assets,
+        version=version,
+        signing_key=key_path,
+        output=tmp_path,
+        expected_public_key=public_key,
+    )
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    assert set(payload["assets"]) == set(names)
+
+    with pytest.raises(ValueError, match="同时包含 arm64 与 x64"):
+        release.build_signed_update_manifest(
+            assets[:3],
+            version=version,
+            signing_key=key_path,
+            output=tmp_path,
+            expected_public_key=public_key,
+        )
+
+
 def test_signed_manifest_rejects_private_key_that_clients_do_not_trust(
     tmp_path: Path,
 ) -> None:

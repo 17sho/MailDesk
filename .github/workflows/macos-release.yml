@@ -1,20 +1,10 @@
-name: macOS Preview
+name: macOS Build
 
 on:
   workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "macOS preview tag"
-        required: true
-        default: "v0.3.1-macos.1"
-      publish:
-        description: "Create or update the GitHub prerelease after both builds pass"
-        required: true
-        type: boolean
-        default: false
   push:
     tags:
-      - "v*-macos.*"
+      - "v*"
 
 permissions:
   contents: read
@@ -126,54 +116,50 @@ jobs:
             cd "$output"
             shasum -a 256 "${base}.zip" "${base}.dmg" >"SHA256SUMS-${{ matrix.asset_arch }}.txt"
           )
+      - name: Verify packaged ZIP with the in-app updater
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          archive="artifacts/macos/MailDesk-v${version}-macos-${{ matrix.asset_arch }}.zip"
+          update_copy="$RUNNER_TEMP/updater-package.zip"
+          cp "$archive" "$update_copy"
+          PYTHONPATH=src python - "$update_copy" "$version" "${{ matrix.expected_machine }}" <<'PY'
+          import hashlib
+          import sys
+          import tempfile
+          from pathlib import Path
+
+          from mailbox_manager.services.update_service import (
+              DownloadedUpdate,
+              InstallMode,
+              ReleaseAsset,
+              ReleaseInfo,
+              UpdateInfo,
+              UpdateService,
+          )
+
+          archive = Path(sys.argv[1])
+          version = sys.argv[2]
+          machine = sys.argv[3]
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          asset = ReleaseAsset(archive.name, "https://github.com/17sho/MailDesk", archive.stat().st_size)
+          release = ReleaseInfo(version, f"v{version}", f"MailDesk {version}", "", "", None, (asset,))
+          update = UpdateInfo("0.0.0", release, InstallMode.MACOS_APP, asset, None, expected_sha256=digest, expected_size=asset.size)
+          with tempfile.TemporaryDirectory(prefix="maildesk-updater-verify-") as temporary:
+              service = UpdateService(
+                  current_version="0.0.0",
+                  updates_dir=Path(temporary) / "updates",
+                  install_mode=InstallMode.MACOS_APP,
+                  machine=machine,
+              )
+              staged = service.stage_update(DownloadedUpdate(update, archive, digest))
+              assert (staged.source_path / "Contents/MacOS/MailDesk").is_file()
+              service.discard_staged_update(staged)
+          PY
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.asset_arch }}
           path: artifacts/macos/*
           if-no-files-found: error
           retention-days: 7
-
-  publish-prerelease:
-    name: publish-macos-prerelease
-    needs: build-macos
-    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: macos-*
-          path: release-assets
-      - name: Prepare release assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          checksum_temp="$(mktemp)"
-          find release-assets -type f -name 'SHA256SUMS-*.txt' -print0 | xargs -0 cat | sort > "$checksum_temp"
-          find release-assets -type f -name 'SHA256SUMS-*.txt' -delete
-          mv "$checksum_temp" release-assets/SHA256SUMS-macos.txt
-          find release-assets -maxdepth 3 -type f -print
-      - name: Create or update prerelease
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DISPATCH_TAG: ${{ inputs.release_tag }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
-            tag="$GITHUB_REF_NAME"
-          else
-            tag="$DISPATCH_TAG"
-          fi
-          mapfile -t assets < <(find release-assets -type f \( -name '*.zip' -o -name '*.dmg' -o -name 'SHA256SUMS-macos.txt' \) | sort)
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "${assets[@]}" --clobber
-            gh release edit "$tag" --prerelease --title "MailDesk macOS Preview · $tag" --notes-file docs/MACOS_RELEASE_NOTES.md
-          else
-            gh release create "$tag" "${assets[@]}" --target "$GITHUB_SHA" --prerelease --title "MailDesk macOS Preview · $tag" --notes-file docs/MACOS_RELEASE_NOTES.md
-          fi

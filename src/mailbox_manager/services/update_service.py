@@ -5,6 +5,9 @@ import hashlib
 import hmac
 import json
 import os
+import platform
+import plistlib
+import posixpath
 import re
 import shutil
 import stat
@@ -89,6 +92,7 @@ class InstallMode(StrEnum):
     SOURCE = "source"
     ONEFILE = "onefile"
     ONEDIR = "onedir"
+    MACOS_APP = "macos-app"
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,22 +176,29 @@ def detect_install_mode(
     frozen: bool | None = None,
     meipass: str | os.PathLike[str] | None = None,
     platform_name: str | None = None,
+    system_name: str | None = None,
+    executable_path: str | os.PathLike[str] | None = None,
 ) -> InstallMode:
-    """Detect a PyInstaller onefile/onedir process without importing PyInstaller."""
+    """Detect a supported frozen install without importing PyInstaller."""
 
     runtime_platform = os.name if platform_name is None else platform_name
-    if runtime_platform != "nt":
-        # The transactional installer is Windows-specific. Packaged macOS builds
-        # may still check releases, but they must use the documented manual path.
-        return InstallMode.SOURCE
     is_frozen = bool(getattr(sys, "frozen", False)) if frozen is None else frozen
     if not is_frozen:
         return InstallMode.SOURCE
-    bundle_root = getattr(sys, "_MEIPASS", "") if meipass is None else meipass
-    bundle_name = str(bundle_root).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
-    if bundle_name.casefold() == "_internal":
-        return InstallMode.ONEDIR
-    return InstallMode.ONEFILE
+    if runtime_platform == "nt":
+        bundle_root = getattr(sys, "_MEIPASS", "") if meipass is None else meipass
+        bundle_name = (
+            str(bundle_root).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1]
+        )
+        if bundle_name.casefold() == "_internal":
+            return InstallMode.ONEDIR
+        return InstallMode.ONEFILE
+
+    runtime_system = platform.system() if system_name is None else system_name
+    executable = Path(executable_path or sys.executable)
+    if runtime_system == "Darwin" and _macos_app_bundle(executable) is not None:
+        return InstallMode.MACOS_APP
+    return InstallMode.SOURCE
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +277,8 @@ class InstallerPlan:
     content_root: Path | None = None
     content_manifest_path: Path | None = None
     content_manifest_sha256: str = ""
+    helper_manifest_path: Path | None = None
+    helper_manifest_sha256: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,6 +451,7 @@ class UpdateService:
         updates_dir: Path,
         repository: str = DEFAULT_REPOSITORY,
         install_mode: InstallMode | str | None = None,
+        machine: str | None = None,
         trusted_public_key: bytes | None = None,
         transport: httpx.BaseTransport | None = None,
         timeout_seconds: float = 30.0,
@@ -479,6 +493,7 @@ class UpdateService:
             if install_mode is None
             else InstallMode(install_mode)
         )
+        self.machine = platform.machine() if machine is None else machine
         public_key = (
             base64.b64decode(TRUSTED_UPDATE_PUBLIC_KEY_B64, validate=True)
             if trusted_public_key is None
@@ -632,10 +647,7 @@ class UpdateService:
         asset: ReleaseAsset | None = None
         signed_asset: SignedManifestAsset | None = None
         if self.install_mode is not InstallMode.SOURCE:
-            expected_name = (
-                f"MailDesk-v{release.version}-windows-x64-"
-                f"{self.install_mode.value}.zip"
-            )
+            expected_name = self._expected_archive_name(release.version)
             asset = release.asset_named(expected_name)
             if asset is None:
                 raise UpdateError(f"新版本缺少当前安装类型的文件：{expected_name}")
@@ -668,6 +680,17 @@ class UpdateService:
             expected_sha256=signed_asset.sha256 if signed_asset else None,
             expected_size=signed_asset.size if signed_asset else None,
         )
+
+    def _expected_archive_name(self, version: str) -> str:
+        if self.install_mode in {InstallMode.ONEFILE, InstallMode.ONEDIR}:
+            return (
+                f"MailDesk-v{version}-windows-x64-"
+                f"{self.install_mode.value}.zip"
+            )
+        if self.install_mode is InstallMode.MACOS_APP:
+            arch = _normalize_macos_arch(self.machine)
+            return f"MailDesk-v{version}-macos-{arch}.zip"
+        raise UpdateError("源码运行模式没有可自动安装的更新包")
 
     def download_update(
         self,
@@ -764,28 +787,44 @@ class UpdateService:
                 archive,
                 temporary_root,
                 cancelled=cancelled,
+                allow_symlinks=update.install_mode is InstallMode.MACOS_APP,
             )
-            prefix = (
-                f"MailDesk-v{update.release.version}-windows-x64-"
-                f"{update.install_mode.value}"
-            )
-            extracted_source = (
-                Path(prefix) / "MailDesk.exe"
-                if update.install_mode is InstallMode.ONEFILE
-                else Path(prefix) / "MailDesk"
-            )
+            if update.install_mode is InstallMode.MACOS_APP:
+                prefix = (
+                    f"MailDesk-v{update.release.version}-macos-"
+                    f"{_normalize_macos_arch(self.machine)}"
+                )
+                extracted_source = Path(prefix) / "MailDesk.app"
+            else:
+                prefix = (
+                    f"MailDesk-v{update.release.version}-windows-x64-"
+                    f"{update.install_mode.value}"
+                )
+                extracted_source = (
+                    Path(prefix) / "MailDesk.exe"
+                    if update.install_mode is InstallMode.ONEFILE
+                    else Path(prefix) / "MailDesk"
+                )
             source = temporary_root / extracted_source
-            expected_executable = (
-                source
-                if update.install_mode is InstallMode.ONEFILE
-                else source / "MailDesk.exe"
-            )
+            if update.install_mode is InstallMode.ONEFILE:
+                expected_executable = source
+            elif update.install_mode is InstallMode.ONEDIR:
+                expected_executable = source / "MailDesk.exe"
+            else:
+                expected_executable = source / "Contents" / "MacOS" / "MailDesk"
             if not expected_executable.is_file():
-                raise UpdateSecurityError("更新包缺少预期的 MailDesk.exe")
-            _validate_staged_windows_executable(
-                expected_executable,
-                update.release.version,
-            )
+                raise UpdateSecurityError("更新包缺少预期的 MailDesk 主程序")
+            if update.install_mode is InstallMode.MACOS_APP:
+                _validate_staged_macos_app(
+                    source,
+                    update.release.version,
+                    _normalize_macos_arch(self.machine),
+                )
+            else:
+                _validate_staged_windows_executable(
+                    expected_executable,
+                    update.release.version,
+                )
             if (
                 update.install_mode is InstallMode.ONEDIR
                 and not (source / "_internal").is_dir()
@@ -802,6 +841,10 @@ class UpdateService:
                 payload_root.mkdir()
                 source.replace(payload_root / "MailDesk.exe")
                 relative_source = Path("payload") / "MailDesk.exe"
+            elif update.install_mode is InstallMode.MACOS_APP:
+                payload_root.mkdir()
+                source.replace(payload_root / "MailDesk.app")
+                relative_source = Path("payload") / "MailDesk.app"
             else:
                 source.replace(payload_root)
                 relative_source = Path("payload")
@@ -821,7 +864,7 @@ class UpdateService:
             content_files = (
                 (source,)
                 if update.install_mode is InstallMode.ONEFILE
-                else tuple(path for path in source.rglob("*") if path.is_file())
+                else _staged_content_paths(source)
             )
             content_manifest = temporary_root / ".staged-files-v1.json"
             content_manifest_sha256 = _write_staged_content_manifest(
@@ -829,6 +872,7 @@ class UpdateService:
                 content_files,
                 content_manifest,
                 cancelled=cancelled,
+                allow_symlinks=update.install_mode is InstallMode.MACOS_APP,
             )
             if final_root.exists():
                 if final_root.is_dir() and not final_root.is_symlink():
@@ -884,9 +928,12 @@ class UpdateService:
         source = staged.source_path.resolve()
         if not _is_relative_to(source, staging_root):
             raise UpdateError("更新源文件不属于当前 MailDesk 更新事务")
-        expected_executable = (
-            source if mode is InstallMode.ONEFILE else source / "MailDesk.exe"
-        )
+        if mode is InstallMode.ONEFILE:
+            expected_executable = source
+        elif mode is InstallMode.ONEDIR:
+            expected_executable = source / "MailDesk.exe"
+        else:
+            expected_executable = source / "Contents" / "MacOS" / "MailDesk"
         if not expected_executable.is_file():
             raise UpdateError("暂存区缺少新版 MailDesk 可执行文件")
         if mode is InstallMode.ONEDIR and not (source / "_internal").is_dir():
@@ -904,12 +951,13 @@ class UpdateService:
             content_files = (
                 (source,)
                 if mode is InstallMode.ONEFILE
-                else tuple(path for path in source.rglob("*") if path.is_file())
+                else _staged_content_paths(source)
             )
             content_manifest_sha256 = _write_staged_content_manifest(
                 content_root,
                 content_files,
                 content_manifest_path,
+                allow_symlinks=mode is InstallMode.MACOS_APP,
             )
         elif (
             not content_manifest_path.is_file()
@@ -929,14 +977,29 @@ class UpdateService:
         if mode is InstallMode.ONEFILE:
             target = executable
             restart_executable = target
-        else:
+        elif mode is InstallMode.ONEDIR:
             target = executable.parent
             restart_executable = target / "MailDesk.exe"
+        else:
+            app_bundle = _macos_app_bundle(executable)
+            if app_bundle is None:
+                raise UpdateError("当前 macOS 程序不在有效的 MailDesk.app 中")
+            target = app_bundle
+            restart_executable = target / "Contents" / "MacOS" / "MailDesk"
         target = target.resolve()
         if mode is InstallMode.ONEDIR and (
             target == Path(target.anchor) or not (target / "_internal").is_dir()
         ):
             raise UpdateError("当前 onedir 程序目录结构无效，不能自动替换")
+        if mode is InstallMode.MACOS_APP and (
+            target == Path(target.anchor)
+            or target.is_symlink()
+            or not target.is_dir()
+            or not os.access(target.parent, os.W_OK)
+        ):
+            raise UpdateError(
+                "MailDesk.app 所在目录不可写，请从发行页面下载 DMG 手动安装"
+            )
         if _is_relative_to(source, target):
             raise UpdateError("更新暂存区不能位于待替换的程序目录内")
 
@@ -958,67 +1021,108 @@ class UpdateService:
         ready_path = self.updates_dir / f".installer-ready-{transaction_id}"
         health_path = self.updates_dir / f".health-{transaction_id}"
         result_path = self.updates_dir / f"install-result-{transaction_id}.log"
+        helper_manifest_path: Path | None = None
+        helper_manifest_sha256 = ""
+        script_suffix = ".sh" if mode is InstallMode.MACOS_APP else ".ps1"
         script_path = self.updates_dir / (
             f"install-v{staged.update.release.version}-{mode.value}-"
-            f"{transaction_id}.ps1"
+            f"{transaction_id}{script_suffix}"
         )
         try:
             self.updates_dir.mkdir(parents=True, exist_ok=True)
             for marker in (ready_path, health_path, result_path):
                 marker.unlink(missing_ok=True)
-            script_path.write_text(
-                _POWERSHELL_INSTALLER_SCRIPT,
-                encoding="utf-8-sig",
-                newline="\r\n",
-            )
+            if mode is InstallMode.MACOS_APP:
+                helper_manifest_path = self.updates_dir / (
+                    f".macos-content-{transaction_id}.manifest"
+                )
+                helper_manifest_sha256 = _write_macos_helper_manifest(
+                    content_root,
+                    helper_manifest_path,
+                )
+                script_path.write_text(
+                    _MACOS_INSTALLER_SCRIPT,
+                    encoding="utf-8",
+                    newline="\n",
+                )
+                script_path.chmod(0o700)
+            else:
+                script_path.write_text(
+                    _POWERSHELL_INSTALLER_SCRIPT,
+                    encoding="utf-8-sig",
+                    newline="\r\n",
+                )
         except OSError as exc:
             self.release_update_lock()
             raise UpdateError("无法创建更新安装脚本") from exc
-        powershell = str(
-            powershell_executable or _default_powershell_executable()
-        )
-        command = (
-            powershell,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script_path),
-            "-ParentPid",
-            str(process_id),
-            "-Mode",
-            mode.value,
-            "-SourcePath",
-            str(source),
-            "-TargetPath",
-            str(target),
-            "-BackupPath",
-            str(backup),
-            "-RestartExecutable",
-            str(restart_executable),
-            "-LockPath",
-            str(self.transaction_lock_path),
-            "-IncomingPath",
-            str(incoming),
-            "-ReadyPath",
-            str(ready_path),
-            "-HealthPath",
-            str(health_path),
-            "-ResultPath",
-            str(result_path),
-            "-CleanupPath",
-            str(staging_root),
-            "-HealthToken",
-            health_token,
-            "-ContentRoot",
-            str(content_root),
-            "-ContentManifestPath",
-            str(content_manifest_path),
-            "-ContentManifestSha256",
-            content_manifest_sha256,
-        )
+        if mode is InstallMode.MACOS_APP:
+            if helper_manifest_path is None:
+                raise UpdateError("无法创建 macOS 更新完整性清单")
+            command = (
+                "/bin/zsh",
+                str(script_path),
+                str(process_id),
+                str(source),
+                str(target),
+                str(backup),
+                str(restart_executable),
+                str(self.transaction_lock_path),
+                str(incoming),
+                str(ready_path),
+                str(health_path),
+                str(result_path),
+                str(staging_root),
+                health_token,
+                str(content_root),
+                str(helper_manifest_path),
+                helper_manifest_sha256,
+            )
+        else:
+            powershell = str(
+                powershell_executable or _default_powershell_executable()
+            )
+            command = (
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-ParentPid",
+                str(process_id),
+                "-Mode",
+                mode.value,
+                "-SourcePath",
+                str(source),
+                "-TargetPath",
+                str(target),
+                "-BackupPath",
+                str(backup),
+                "-RestartExecutable",
+                str(restart_executable),
+                "-LockPath",
+                str(self.transaction_lock_path),
+                "-IncomingPath",
+                str(incoming),
+                "-ReadyPath",
+                str(ready_path),
+                "-HealthPath",
+                str(health_path),
+                "-ResultPath",
+                str(result_path),
+                "-CleanupPath",
+                str(staging_root),
+                "-HealthToken",
+                health_token,
+                "-ContentRoot",
+                str(content_root),
+                "-ContentManifestPath",
+                str(content_manifest_path),
+                "-ContentManifestSha256",
+                content_manifest_sha256,
+            )
         return InstallerPlan(
             script_path=script_path,
             command=command,
@@ -1037,6 +1141,8 @@ class UpdateService:
             content_root=content_root,
             content_manifest_path=content_manifest_path,
             content_manifest_sha256=content_manifest_sha256,
+            helper_manifest_path=helper_manifest_path,
+            helper_manifest_sha256=helper_manifest_sha256,
         )
 
     def launch_installer(self, plan: InstallerPlan) -> subprocess.Popen[bytes]:
@@ -1208,19 +1314,22 @@ class UpdateService:
         destination: Path,
         *,
         cancelled: CancelCallback | None = None,
+        allow_symlinks: bool = False,
     ) -> None:
         destination_root = destination.resolve()
         with zipfile.ZipFile(archive_path) as archive:
             entries = archive.infolist()
             if len(entries) > self._max_archive_entries:
                 raise UpdateSecurityError("更新包内文件数量异常")
-            planned: list[tuple[zipfile.ZipInfo, Path]] = []
+            planned: list[tuple[zipfile.ZipInfo, Path, bool, str | None]] = []
             normalized_names: set[str] = set()
             total_size = 0
             for info in entries:
                 if cancelled is not None and cancelled():
                     raise UpdateCancelledError("更新暂存已取消")
-                parts = _safe_zip_parts(info)
+                parts = _safe_zip_parts(info, allow_symlinks=allow_symlinks)
+                unix_mode = info.external_attr >> 16
+                is_symlink = stat.S_ISLNK(unix_mode)
                 normalized_name = "/".join(part.casefold() for part in parts)
                 if normalized_name in normalized_names:
                     raise UpdateSecurityError("更新包包含名称冲突的文件")
@@ -1242,14 +1351,28 @@ class UpdateService:
                 target = destination_root.joinpath(*parts).resolve()
                 if not _is_relative_to(target, destination_root):
                     raise UpdateSecurityError("更新包包含越界路径")
-                planned.append((info, target))
+                link_target: str | None = None
+                if is_symlink:
+                    if info.file_size > 4096:
+                        raise UpdateSecurityError("更新包中的符号链接目标过长")
+                    raw_target = archive.read(info)
+                    try:
+                        link_target = raw_target.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise UpdateSecurityError("更新包中的符号链接目标无效") from exc
+                    _validate_macos_symlink(parts, link_target)
+                planned.append((info, target, is_symlink, link_target))
 
             extracted_size = 0
-            for info, target in planned:
+            for info, target, is_symlink, _link_target in planned:
                 if cancelled is not None and cancelled():
                     raise UpdateCancelledError("更新暂存已取消")
+                if is_symlink:
+                    continue
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
+                    if allow_symlinks:
+                        target.chmod((info.external_attr >> 16) & 0o777 or 0o755)
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
                 file_size = 0
@@ -1268,6 +1391,18 @@ class UpdateService:
                         output.write(chunk)
                 if file_size != info.file_size:
                     raise UpdateSecurityError("更新包内文件长度无效")
+                if allow_symlinks:
+                    target.chmod((info.external_attr >> 16) & 0o777 or 0o644)
+
+            for _info, target, is_symlink, link_target in planned:
+                if not is_symlink:
+                    continue
+                if cancelled is not None and cancelled():
+                    raise UpdateCancelledError("更新暂存已取消")
+                if link_target is None:
+                    raise UpdateSecurityError("更新包中的符号链接目标无效")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(link_target)
 
     @staticmethod
     def _send_with_trusted_redirects(
@@ -1444,33 +1579,167 @@ def _validate_staged_windows_executable(path: Path, version: str) -> None:
         ) from exc
 
 
+def _normalize_macos_arch(machine: str) -> str:
+    normalized = machine.casefold().strip()
+    if normalized in {"arm64", "aarch64"}:
+        return "arm64"
+    if normalized in {"x86_64", "amd64", "x64"}:
+        return "x64"
+    raise UpdateError(f"当前 macOS 架构不支持自动更新：{machine}")
+
+
+def _macos_app_bundle(executable: Path) -> Path | None:
+    candidate = Path(executable)
+    if candidate.name != "MailDesk" or candidate.parent.name != "MacOS":
+        return None
+    contents = candidate.parent.parent
+    bundle = contents.parent
+    if contents.name != "Contents" or bundle.suffix.casefold() != ".app":
+        return None
+    return bundle
+
+
+def _validate_macos_symlink(parts: tuple[str, ...], target: str) -> None:
+    if (
+        not target
+        or len(target.encode("utf-8")) > 4096
+        or any(character in target for character in ("\x00", "\r", "\n", "\t", "\\"))
+        or PurePosixPath(target).is_absolute()
+    ):
+        raise UpdateSecurityError("更新包中的符号链接目标无效")
+    parent = posixpath.dirname("/".join(parts))
+    normalized = posixpath.normpath(posixpath.join(parent, target))
+    if normalized in {"", ".", ".."} or normalized.startswith("../"):
+        raise UpdateSecurityError("更新包中的符号链接越界")
+
+
+def _staged_content_paths(root: Path) -> tuple[Path, ...]:
+    paths: list[Path] = []
+    for current_root, directories, filenames in os.walk(root, followlinks=False):
+        current = Path(current_root)
+        retained_directories: list[str] = []
+        for name in directories:
+            candidate = current / name
+            if candidate.is_symlink():
+                paths.append(candidate)
+            elif candidate.is_dir():
+                retained_directories.append(name)
+            else:
+                raise UpdateSecurityError("更新暂存区包含特殊文件")
+        directories[:] = retained_directories
+        for name in filenames:
+            candidate = current / name
+            if candidate.is_symlink() or candidate.is_file():
+                paths.append(candidate)
+            else:
+                raise UpdateSecurityError("更新暂存区包含特殊文件")
+    return tuple(paths)
+
+
+def _macho_architectures(path: Path) -> frozenset[str]:
+    data = path.read_bytes()[:4096]
+    if len(data) < 8:
+        raise ValueError("Mach-O header is truncated")
+    magic = data[:4]
+    thin_endian: str | None = None
+    if magic in {b"\xfe\xed\xfa\xce", b"\xfe\xed\xfa\xcf"}:
+        thin_endian = ">"
+    elif magic in {b"\xce\xfa\xed\xfe", b"\xcf\xfa\xed\xfe"}:
+        thin_endian = "<"
+    if thin_endian is not None:
+        cpu_type = struct.unpack_from(f"{thin_endian}I", data, 4)[0]
+        return frozenset({_macho_cpu_name(cpu_type)})
+
+    if magic not in {b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca"}:
+        raise ValueError("not a Mach-O executable")
+    endian = ">" if magic == b"\xca\xfe\xba\xbe" else "<"
+    count = struct.unpack_from(f"{endian}I", data, 4)[0]
+    if not 1 <= count <= 16 or len(data) < 8 + count * 20:
+        raise ValueError("invalid fat Mach-O header")
+    return frozenset(
+        _macho_cpu_name(struct.unpack_from(f"{endian}I", data, 8 + index * 20)[0])
+        for index in range(count)
+    )
+
+
+def _macho_cpu_name(cpu_type: int) -> str:
+    if cpu_type == 0x0100000C:
+        return "arm64"
+    if cpu_type == 0x01000007:
+        return "x64"
+    raise ValueError(f"unsupported Mach-O CPU type: {cpu_type:#x}")
+
+
+def _validate_staged_macos_app(app: Path, version: str, arch: str) -> None:
+    executable = app / "Contents" / "MacOS" / "MailDesk"
+    info_path = app / "Contents" / "Info.plist"
+    try:
+        if app.is_symlink() or not app.is_dir() or not info_path.is_file():
+            raise ValueError("invalid app bundle")
+        info = plistlib.loads(info_path.read_bytes())
+        if not isinstance(info, dict):
+            raise ValueError("invalid Info.plist")
+        if info.get("CFBundleIdentifier") != "com.maildesk.app":
+            raise ValueError("bundle identifier mismatch")
+        if info.get("CFBundleShortVersionString") != version:
+            raise ValueError("bundle version mismatch")
+        minimum = str(info.get("LSMinimumSystemVersion", ""))
+        if not re.fullmatch(r"\d+(?:\.\d+){1,2}", minimum):
+            raise ValueError("minimum macOS version missing")
+        if arch not in _macho_architectures(executable):
+            raise ValueError("Mach-O architecture mismatch")
+        if not executable.stat().st_mode & stat.S_IXUSR:
+            raise ValueError("MailDesk entry point is not executable")
+    except (OSError, TypeError, ValueError, plistlib.InvalidFileException) as exc:
+        raise UpdateSecurityError(
+            f"更新包中的 MailDesk.app 不是预期版本的 macOS {arch} 应用"
+        ) from exc
+
+
 def _write_staged_content_manifest(
     content_root: Path,
     files: tuple[Path, ...],
     manifest_path: Path,
     *,
     cancelled: CancelCallback | None = None,
+    allow_symlinks: bool = False,
 ) -> str:
     entries: list[dict[str, object]] = []
     for path in sorted(files, key=lambda item: item.relative_to(content_root).as_posix()):
         if cancelled is not None and cancelled():
             raise UpdateCancelledError("更新暂存已取消")
-        if path.is_symlink() or not path.is_file():
-            raise UpdateSecurityError("更新暂存区包含链接或特殊文件")
         relative = path.relative_to(content_root).as_posix()
-        if not relative or relative.startswith("../"):
+        if not relative or relative.startswith("../") or any(
+            character in relative for character in ("\r", "\n", "\t", "\\")
+        ):
             raise UpdateSecurityError("更新暂存区文件路径无效")
-        entries.append(
-            {
-                "path": relative,
-                "size": path.stat().st_size,
-                "sha256": _sha256_file(path),
-            }
-        )
+        if path.is_symlink():
+            if not allow_symlinks:
+                raise UpdateSecurityError("更新暂存区包含链接或特殊文件")
+            target = os.readlink(path)
+            _validate_macos_symlink(tuple(PurePosixPath(relative).parts), target)
+            entries.append(
+                {
+                    "path": relative,
+                    "target": target,
+                    "type": "symlink",
+                }
+            )
+            continue
+        if not path.is_file():
+            raise UpdateSecurityError("更新暂存区包含链接或特殊文件")
+        entry: dict[str, object] = {
+            "path": relative,
+            "size": path.stat().st_size,
+            "sha256": _sha256_file(path),
+        }
+        if allow_symlinks:
+            entry["type"] = "file"
+        entries.append(entry)
     if not entries:
         raise UpdateSecurityError("更新暂存区没有可安装文件")
     content = json.dumps(
-        {"schema": 1, "files": entries},
+        {"schema": 2 if allow_symlinks else 1, "files": entries},
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -1493,29 +1762,24 @@ def _verify_staged_content_manifest(
             raise ValueError("manifest hash mismatch")
         payload = json.loads(content)
         files = payload["files"]
-        if payload.get("schema") != 1 or not isinstance(files, list):
+        schema = payload.get("schema")
+        if schema not in {1, 2} or not isinstance(files, list):
             raise ValueError("manifest schema")
         if not 1 <= len(files) <= 30_000:
             raise ValueError("manifest file count")
         root = content_root.resolve()
         used_paths: set[str] = set()
+        manifest_paths: set[str] = set()
         for entry in files:
-            if not isinstance(entry, dict) or set(entry) != {"path", "sha256", "size"}:
+            if not isinstance(entry, dict):
                 raise ValueError("manifest entry")
             relative = entry["path"]
-            size = entry["size"]
-            digest = entry["sha256"]
             if (
                 not isinstance(relative, str)
                 or not relative
-                or "\\" in relative
+                or any(character in relative for character in ("\r", "\n", "\t", "\\"))
                 or PurePosixPath(relative).is_absolute()
                 or any(part in {"", ".", ".."} for part in PurePosixPath(relative).parts)
-                or not isinstance(size, int)
-                or isinstance(size, bool)
-                or size < 0
-                or not isinstance(digest, str)
-                or not _SHA256_PATTERN.fullmatch(digest)
             ):
                 raise ValueError("manifest entry value")
             normalized = relative.casefold()
@@ -1523,22 +1787,83 @@ def _verify_staged_content_manifest(
                 raise ValueError("duplicate manifest path")
             used_paths.add(normalized)
             candidate = root.joinpath(*PurePosixPath(relative).parts)
-            path = candidate.resolve()
-            if (
-                not _is_relative_to(path, root)
-                or candidate.is_symlink()
-                or not path.is_file()
-                or path.stat().st_size != size
-                or not hmac.compare_digest(_sha256_file(path), digest.casefold())
-            ):
-                raise ValueError("staged content mismatch")
+            manifest_paths.add(relative)
+            entry_type = entry.get("type", "file")
+            if schema == 1 and set(entry) != {"path", "sha256", "size"}:
+                raise ValueError("manifest v1 entry")
+            if entry_type == "file":
+                if set(entry) not in (
+                    {"path", "sha256", "size"},
+                    {"path", "sha256", "size", "type"},
+                ):
+                    raise ValueError("manifest file entry")
+                size = entry["size"]
+                digest = entry["sha256"]
+                if (
+                    not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size < 0
+                    or not isinstance(digest, str)
+                    or not _SHA256_PATTERN.fullmatch(digest)
+                    or candidate.is_symlink()
+                    or not candidate.is_file()
+                    or candidate.stat().st_size != size
+                    or not hmac.compare_digest(_sha256_file(candidate), digest.casefold())
+                ):
+                    raise ValueError("staged content mismatch")
+            elif schema == 2 and entry_type == "symlink":
+                if set(entry) != {"path", "target", "type"}:
+                    raise ValueError("manifest symlink entry")
+                target = entry["target"]
+                if not isinstance(target, str):
+                    raise ValueError("manifest symlink target")
+                _validate_macos_symlink(tuple(PurePosixPath(relative).parts), target)
+                if not candidate.is_symlink() or os.readlink(candidate) != target:
+                    raise ValueError("staged symlink mismatch")
+            else:
+                raise ValueError("manifest entry type")
+        actual_paths = {
+            path.relative_to(root).as_posix()
+            for path in _staged_content_paths(root)
+            if path.resolve() != manifest_path.resolve()
+        }
+        if actual_paths != manifest_paths:
+            raise ValueError("staged content contains unlisted entries")
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise UpdateSecurityError("更新暂存文件已被修改，已阻止安装") from exc
 
 
-def _safe_zip_parts(info: zipfile.ZipInfo) -> tuple[str, ...]:
+def _write_macos_helper_manifest(content_root: Path, target: Path) -> str:
+    lines: list[str] = []
+    for path in sorted(
+        _staged_content_paths(content_root),
+        key=lambda item: item.relative_to(content_root).as_posix(),
+    ):
+        relative = path.relative_to(content_root).as_posix()
+        if any(character in relative for character in ("\r", "\n", "\t", "\\")):
+            raise UpdateSecurityError("macOS 更新文件路径无法安全交给安装助手")
+        if path.is_symlink():
+            link_target = os.readlink(path)
+            _validate_macos_symlink(tuple(PurePosixPath(relative).parts), link_target)
+            lines.append(f"L\t-\t-\t{relative}\t{link_target}\n")
+        elif path.is_file():
+            lines.append(
+                f"F\t{_sha256_file(path)}\t{path.stat().st_size}\t{relative}\t\n"
+            )
+        else:
+            raise UpdateSecurityError("macOS 更新暂存区包含特殊文件")
+    if not lines:
+        raise UpdateSecurityError("macOS 更新暂存区没有可安装文件")
+    content = "".join(lines).encode("utf-8")
+    target.write_bytes(content)
+    return hashlib.sha256(content).hexdigest()
+
+
+def _safe_zip_parts(
+    info: zipfile.ZipInfo, *, allow_symlinks: bool = False
+) -> tuple[str, ...]:
     name = info.filename
-    if not name or "\x00" in name or "\\" in name:
+    if not name or any(character in name for character in ("\x00", "\r", "\n", "\t", "\\")):
         raise UpdateSecurityError("更新包包含无效路径")
     path = PurePosixPath(name)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
@@ -1556,8 +1881,13 @@ def _safe_zip_parts(info: zipfile.ZipInfo) -> tuple[str, ...]:
         raise UpdateSecurityError("更新包包含加密文件")
     unix_mode = info.external_attr >> 16
     file_type = stat.S_IFMT(unix_mode)
-    if stat.S_ISLNK(unix_mode) or file_type not in (0, stat.S_IFREG, stat.S_IFDIR):
+    if stat.S_ISLNK(unix_mode) and not allow_symlinks:
         raise UpdateSecurityError("更新包包含链接或特殊文件")
+    allowed_types = (0, stat.S_IFREG, stat.S_IFDIR, stat.S_IFLNK)
+    if file_type not in allowed_types:
+        raise UpdateSecurityError("更新包包含链接或特殊文件")
+    if unix_mode & (stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX):
+        raise UpdateSecurityError("更新包包含不安全的文件权限")
     if (info.is_dir() and file_type == stat.S_IFREG) or (
         not info.is_dir() and file_type == stat.S_IFDIR
     ):
@@ -1586,6 +1916,259 @@ def _default_powershell_executable() -> str:
         if candidate.is_file():
             return str(candidate)
     return "powershell.exe"
+
+
+_MACOS_INSTALLER_SCRIPT = r'''#!/bin/zsh
+set -u
+
+ParentPid="$1"
+SourcePath="$2"
+TargetPath="$3"
+BackupPath="$4"
+RestartExecutable="$5"
+LockPath="$6"
+IncomingPath="$7"
+ReadyPath="$8"
+HealthPath="$9"
+ResultPath="${10}"
+CleanupPath="${11}"
+HealthToken="${12}"
+ContentRoot="${13}"
+ContentManifestPath="${14}"
+ContentManifestSha256="${15}"
+HelperLock="${LockPath}.helper"
+OriginalMoved=0
+NewPid=""
+
+write_result() {
+    /usr/bin/printf '%s\n' "$1" > "$ResultPath" 2>/dev/null || true
+}
+
+cleanup_helper_lock() {
+    /bin/rmdir "$HelperLock" 2>/dev/null || true
+}
+
+restart_old_version() {
+    if [[ -x "$RestartExecutable" ]]; then
+        "$RestartExecutable" >/dev/null 2>&1 &
+    fi
+}
+
+rollback_update() {
+    if [[ -n "$NewPid" ]] && /bin/kill -0 "$NewPid" 2>/dev/null; then
+        /bin/kill -9 "$NewPid" 2>/dev/null || true
+    fi
+    if [[ -e "$IncomingPath" || -L "$IncomingPath" ]]; then
+        /bin/rm -rf -- "$IncomingPath" 2>/dev/null || true
+    fi
+    if [[ "$OriginalMoved" == "1" ]]; then
+        if [[ -e "$TargetPath" || -L "$TargetPath" ]]; then
+            /bin/rm -rf -- "$TargetPath" 2>/dev/null || true
+        fi
+        if [[ -e "$BackupPath" ]]; then
+            /bin/mv "$BackupPath" "$TargetPath" 2>/dev/null || true
+        fi
+    fi
+}
+
+fail_update() {
+    local reason="${1//$'\n'/ }"
+    reason="${reason//$'\r'/ }"
+    rollback_update
+    /usr/bin/printf 'failed_and_rolled_back\n%s\n' \
+        "${reason[1,1024]}" > "$ResultPath" 2>/dev/null || true
+    restart_old_version
+    cleanup_helper_lock
+    exit 1
+}
+
+validate_relative_path() {
+    local value="$1"
+    if [[ -z "$value" || "$value" == /* || "$value" == *\\* \
+        || "$value" == *$'\n'* || "$value" == *$'\r'* || "$value" == *$'\t'* ]]; then
+        return 1
+    fi
+    local -a segments
+    segments=("${(@s:/:)value}")
+    local segment
+    for segment in "${segments[@]}"; do
+        if [[ -z "$segment" || "$segment" == "." || "$segment" == ".." ]]; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+validate_link_target() {
+    local relative="$1"
+    local target="$2"
+    if [[ -z "$target" || "$target" == /* || "$target" == *\\* \
+        || "$target" == *$'\n'* || "$target" == *$'\r'* || "$target" == *$'\t'* ]]; then
+        return 1
+    fi
+    local combined="${relative:h}/$target"
+    local -a segments
+    segments=("${(@s:/:)combined}")
+    local segment
+    local -i depth=0
+    for segment in "${segments[@]}"; do
+        if [[ -z "$segment" || "$segment" == "." ]]; then
+            continue
+        fi
+        if [[ "$segment" == ".." ]]; then
+            (( depth -= 1 ))
+            if (( depth < 0 )); then
+                return 1
+            fi
+        else
+            (( depth += 1 ))
+        fi
+    done
+    (( depth > 0 ))
+}
+
+if ! /usr/bin/printf '%s' "$HealthToken" > "$ReadyPath"; then
+    exit 3
+fi
+
+Deadline=$(( EPOCHSECONDS + 120 ))
+while /bin/kill -0 "$ParentPid" 2>/dev/null; do
+    if (( EPOCHSECONDS >= Deadline )); then
+        write_result "parent_exit_timeout"
+        exit 4
+    fi
+    /bin/sleep 0.1
+done
+
+if ! /bin/mkdir "$HelperLock" 2>/dev/null; then
+    write_result "transaction_lock_failed"
+    restart_old_version
+    exit 2
+fi
+trap cleanup_helper_lock EXIT
+
+TargetParent="${TargetPath:h}"
+if [[ "$TargetPath" != *.app || "$SourcePath" != *.app \
+    || "$ContentRoot" != "$SourcePath" \
+    || "$RestartExecutable" != "$TargetPath/Contents/MacOS/MailDesk" \
+    || "${BackupPath:h}" != "$TargetParent" \
+    || "${IncomingPath:h}" != "$TargetParent" \
+    || "$BackupPath" != "$TargetParent/.${TargetPath:t}.maildesk-backup-"* \
+    || "$IncomingPath" != "$TargetParent/.${TargetPath:t}.maildesk-incoming-"* ]]; then
+    fail_update "unsafe updater path"
+fi
+
+if [[ ! -d "$SourcePath" || -L "$SourcePath" \
+    || ! -x "$SourcePath/Contents/MacOS/MailDesk" \
+    || ! -f "$ContentManifestPath" || -L "$ContentManifestPath" ]]; then
+    fail_update "staged macOS app is incomplete"
+fi
+
+ManifestHash="$(
+    /usr/bin/shasum -a 256 "$ContentManifestPath" 2>/dev/null \
+        | /usr/bin/awk '{print $1}'
+)"
+if [[ "$ManifestHash" != "$ContentManifestSha256" ]]; then
+    fail_update "staged content manifest hash mismatch"
+fi
+
+EntryCount=0
+while IFS=$'\t' read -r Kind Digest Size Relative LinkTarget \
+    || [[ -n "$Kind$Digest$Size$Relative$LinkTarget" ]]; do
+    if ! validate_relative_path "$Relative"; then
+        fail_update "invalid staged content path"
+    fi
+    Candidate="$ContentRoot/$Relative"
+    case "$Kind" in
+        F)
+            if [[ ! -f "$Candidate" || -L "$Candidate" || "$Size" != <-> ]]; then
+                fail_update "staged file is missing"
+            fi
+            ActualSize="$(/usr/bin/stat -f '%z' "$Candidate" 2>/dev/null)"
+            ActualHash="$(
+                /usr/bin/shasum -a 256 "$Candidate" 2>/dev/null \
+                    | /usr/bin/awk '{print $1}'
+            )"
+            if [[ "$ActualSize" != "$Size" || "$ActualHash" != "$Digest" ]]; then
+                fail_update "staged file integrity check failed"
+            fi
+            ;;
+        L)
+            if [[ ! -L "$Candidate" ]] || ! validate_link_target "$Relative" "$LinkTarget"; then
+                fail_update "staged symbolic link is invalid"
+            fi
+            ActualTarget="$(/usr/bin/readlink "$Candidate" 2>/dev/null)"
+            if [[ "$ActualTarget" != "$LinkTarget" ]]; then
+                fail_update "staged symbolic link changed"
+            fi
+            ;;
+        *)
+            fail_update "staged content manifest entry is invalid"
+            ;;
+    esac
+    (( EntryCount += 1 ))
+done < "$ContentManifestPath"
+
+ActualCount="$(
+    /usr/bin/find "$ContentRoot" \( -type f -o -type l \) -print \
+        | /usr/bin/wc -l | /usr/bin/tr -d ' '
+)"
+SpecialEntry="$(/usr/bin/find "$ContentRoot" ! -type d ! -type f ! -type l -print -quit)"
+if (( EntryCount < 1 )) || [[ "$ActualCount" != "$EntryCount" || -n "$SpecialEntry" ]]; then
+    fail_update "staged content contains unlisted entries"
+fi
+
+if [[ -e "$IncomingPath" || -L "$IncomingPath" ]]; then
+    /bin/rm -rf -- "$IncomingPath" || fail_update "cannot clean incoming app"
+fi
+if ! /usr/bin/ditto "$SourcePath" "$IncomingPath"; then
+    fail_update "cannot copy incoming app"
+fi
+if [[ ! -x "$IncomingPath/Contents/MacOS/MailDesk" ]]; then
+    fail_update "incoming app entry point is missing"
+fi
+if [[ -e "$BackupPath" || -L "$BackupPath" ]]; then
+    /bin/rm -rf -- "$BackupPath" || fail_update "cannot clean previous backup"
+fi
+if ! /bin/mv "$TargetPath" "$BackupPath"; then
+    fail_update "cannot back up current app"
+fi
+OriginalMoved=1
+if ! /bin/mv "$IncomingPath" "$TargetPath"; then
+    fail_update "cannot activate incoming app"
+fi
+
+MAILDESK_UPDATE_HEALTH_TOKEN="$HealthToken" \
+MAILDESK_UPDATE_HEALTH_FILE="$HealthPath" \
+    "$RestartExecutable" >/dev/null 2>&1 &
+NewPid=$!
+Deadline=$(( EPOCHSECONDS + 120 ))
+Healthy=0
+while (( EPOCHSECONDS < Deadline )); do
+    if [[ -f "$HealthPath" ]] \
+        && [[ "$(/bin/cat "$HealthPath" 2>/dev/null)" == "$HealthToken" ]]; then
+        Healthy=1
+        break
+    fi
+    if ! /bin/kill -0 "$NewPid" 2>/dev/null; then
+        break
+    fi
+    /bin/sleep 0.25
+done
+if [[ "$Healthy" != "1" ]]; then
+    fail_update "new MailDesk process did not report healthy startup"
+fi
+/bin/sleep 3
+if ! /bin/kill -0 "$NewPid" 2>/dev/null; then
+    fail_update "new MailDesk process exited during startup health check"
+fi
+
+write_result "success"
+/bin/rm -rf -- "$BackupPath" "$CleanupPath" 2>/dev/null || true
+/bin/rm -f -- "$HealthPath" "$ReadyPath" "$ContentManifestPath" 2>/dev/null || true
+cleanup_helper_lock
+exit 0
+'''
 
 
 _POWERSHELL_INSTALLER_SCRIPT = r'''param(

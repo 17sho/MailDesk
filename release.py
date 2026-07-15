@@ -105,14 +105,29 @@ def build_signed_update_manifest(
 ) -> tuple[Path, Path]:
     """Create the canonical update manifest and its raw Ed25519 signature."""
 
-    expected_names = {
+    required_names = {
         f"MailDesk-v{version}-windows-x64-onefile.zip",
         f"MailDesk-v{version}-windows-x64-onedir.zip",
     }
-    if {path.name for path in archives} != expected_names or any(
-        not path.is_file() for path in archives
-    ):
+    macos_zip_names = {
+        f"MailDesk-v{version}-macos-arm64.zip",
+        f"MailDesk-v{version}-macos-x64.zip",
+    }
+    macos_dmg_names = {
+        f"MailDesk-v{version}-macos-arm64.dmg",
+        f"MailDesk-v{version}-macos-x64.dmg",
+    }
+    names = {path.name for path in archives}
+    if len(names) != len(archives) or any(not path.is_file() for path in archives):
+        raise ValueError("签名清单包含重复或不存在的发行文件")
+    if not required_names.issubset(names):
         raise ValueError("签名清单必须包含当前版本的 onefile 与 onedir 压缩包")
+    if not names.issubset(required_names | macos_zip_names | macos_dmg_names):
+        raise ValueError("签名清单包含名称或版本不受支持的发行文件")
+    if names.intersection(macos_zip_names) not in (set(), macos_zip_names):
+        raise ValueError("macOS 自动更新 ZIP 必须同时包含 arm64 与 x64")
+    if names.intersection(macos_dmg_names) not in (set(), macos_dmg_names):
+        raise ValueError("macOS DMG 必须同时包含 arm64 与 x64")
     try:
         private_key = serialization.load_pem_private_key(
             signing_key.read_bytes(),
@@ -326,6 +341,13 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--dist", type=Path, help="包含 onefile 与 onedir 构建结果的目录")
     parser.add_argument(
+        "--extra-asset",
+        type=Path,
+        action="append",
+        default=[],
+        help="加入同版本 macOS arm64/x64 ZIP 或 DMG；可重复指定",
+    )
+    parser.add_argument(
         "--signing-key",
         type=Path,
         default=(
@@ -346,17 +368,18 @@ def main() -> int:
         version=arguments.version or detected,
         dist=arguments.dist,
     )
+    release_assets = (onefile_zip, onedir_zip, *arguments.extra_asset)
     manifest, signature = build_signed_update_manifest(
-        (onefile_zip, onedir_zip),
+        release_assets,
         version=arguments.version or detected,
         signing_key=arguments.signing_key,
         output=arguments.output,
     )
     write_checksum_file(
-        (onefile_zip, onedir_zip, manifest, signature),
+        (*release_assets, manifest, signature),
         checksum_file,
     )
-    for path in (onefile_zip, onedir_zip, manifest, signature, checksum_file):
+    for path in (*release_assets, manifest, signature, checksum_file):
         print(f"发布文件：{path}")
     return 0
 

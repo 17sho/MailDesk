@@ -4,10 +4,14 @@ import hashlib
 import io
 import json
 import os
+import platform
+import plistlib
 import shutil
 import stat
+import struct
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -111,10 +115,15 @@ def _release_payload(
     *,
     version: str = "0.3.0",
     mode: InstallMode = InstallMode.ONEFILE,
+    machine: str = "x86_64",
     digest: str | None | object = ...,  # type: ignore[assignment]
     include_checksums: bool = True,
 ) -> dict[str, object]:
-    archive_name = f"MailDesk-v{version}-windows-x64-{mode.value}.zip"
+    if mode is InstallMode.MACOS_APP:
+        arch = "arm64" if machine in {"arm64", "aarch64"} else "x64"
+        archive_name = f"MailDesk-v{version}-macos-{arch}.zip"
+    else:
+        archive_name = f"MailDesk-v{version}-windows-x64-{mode.value}.zip"
     if digest is ...:
         digest = f"sha256:{hashlib.sha256(archive).hexdigest()}"
     assets: list[dict[str, object]] = [
@@ -197,6 +206,55 @@ def _zip_payload(mode: InstallMode, *, version: str = "0.3.0") -> bytes:
     return stream.getvalue()
 
 
+def _macos_zip_payload(*, version: str = "0.3.0", arch: str = "arm64") -> bytes:
+    stream = io.BytesIO()
+    prefix = f"MailDesk-v{version}-macos-{arch}/MailDesk.app"
+    cpu_type = 0x0100000C if arch == "arm64" else 0x01000007
+    info_plist = plistlib.dumps(
+        {
+            "CFBundleIdentifier": "com.maildesk.app",
+            "CFBundleShortVersionString": version,
+            "CFBundleVersion": version,
+            "LSMinimumSystemVersion": "13.0",
+        }
+    )
+
+    def write_file(archive: zipfile.ZipFile, name: str, content: bytes, mode: int) -> None:
+        info = zipfile.ZipInfo(name)
+        info.create_system = 3
+        info.external_attr = (stat.S_IFREG | mode) << 16
+        archive.writestr(info, content)
+
+    with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        write_file(
+            archive,
+            f"{prefix}/Contents/MacOS/MailDesk",
+            b"\xcf\xfa\xed\xfe" + struct.pack("<I", cpu_type) + b"\0" * 24,
+            0o755,
+        )
+        write_file(
+            archive,
+            f"{prefix}/Contents/Info.plist",
+            info_plist,
+            0o644,
+        )
+        write_file(
+            archive,
+            f"{prefix}/Contents/Frameworks/Example.framework/Versions/A/Example",
+            b"framework",
+            0o755,
+        )
+        for relative, target in (
+            ("Contents/Frameworks/Example.framework/Versions/Current", "A"),
+            ("Contents/Frameworks/Example.framework/Example", "Versions/Current/Example"),
+        ):
+            link = zipfile.ZipInfo(f"{prefix}/{relative}")
+            link.create_system = 3
+            link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            archive.writestr(link, target)
+    return stream.getvalue()
+
+
 def _json_response(request: httpx.Request, payload: object) -> httpx.Response:
     return httpx.Response(
         200,
@@ -236,7 +294,11 @@ def _service(
 
 def _static_update(mode: InstallMode, archive: bytes) -> UpdateInfo:
     version = "0.3.0"
-    name = f"MailDesk-v{version}-windows-x64-{mode.value}.zip"
+    name = (
+        f"MailDesk-v{version}-macos-arm64.zip"
+        if mode is InstallMode.MACOS_APP
+        else f"MailDesk-v{version}-windows-x64-{mode.value}.zip"
+    )
     asset = ReleaseAsset(
         name=name,
         download_url=_asset_url(name),
@@ -312,6 +374,15 @@ def test_detects_source_onefile_and_onedir_modes() -> None:
         )
         is InstallMode.SOURCE
     )
+    assert (
+        detect_install_mode(
+            frozen=True,
+            platform_name="posix",
+            system_name="Darwin",
+            executable_path="/Applications/MailDesk.app/Contents/MacOS/MailDesk",
+        )
+        is InstallMode.MACOS_APP
+    )
 
 
 def test_parse_release_rejects_drafts_prereleases_and_duplicate_assets() -> None:
@@ -352,6 +423,33 @@ def test_check_update_uses_exact_mode_asset_and_source_never_selects_installer(
     assert source.install_mode is InstallMode.SOURCE
     assert source.asset is None
     assert not source.install_supported
+
+
+@pytest.mark.parametrize(
+    ("machine", "arch"),
+    [("arm64", "arm64"), ("aarch64", "arm64"), ("x86_64", "x64")],
+)
+def test_check_update_selects_native_macos_archive(
+    tmp_path: Path, machine: str, arch: str
+) -> None:
+    archive = _macos_zip_payload(arch=arch)
+    payload = _release_payload(
+        archive,
+        mode=InstallMode.MACOS_APP,
+        machine=machine,
+    )
+
+    service = _service(
+        tmp_path,
+        lambda request: _json_response(request, payload),
+        mode=InstallMode.MACOS_APP,
+        machine=machine,
+    )
+    update = service.check_for_update()
+
+    assert update is not None and update.asset is not None
+    assert update.install_supported
+    assert update.asset.name == f"MailDesk-v0.3.0-macos-{arch}.zip"
 
 
 def test_check_update_returns_none_when_latest_is_not_newer(tmp_path: Path) -> None:
@@ -858,5 +956,181 @@ def test_powershell_helper_rolls_back_an_onedir_start_failure(tmp_path: Path) ->
     parent.wait(timeout=5)
     assert current.read_bytes() == b"old executable"
     assert old_runtime.read_bytes() == b"old runtime"
+    assert not plan.backup_path.exists()
+    assert plan.incoming_path is not None and not plan.incoming_path.exists()
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS symlinks")
+def test_stage_valid_macos_app_preserves_relative_symlinks(tmp_path: Path) -> None:
+    archive = _macos_zip_payload()
+    archive_path = tmp_path / "macos.zip"
+    archive_path.write_bytes(archive)
+    update = _static_update(InstallMode.MACOS_APP, archive)
+    service = _service(
+        tmp_path,
+        lambda request: None,
+        mode=InstallMode.MACOS_APP,
+        machine="arm64",
+    )
+
+    staged = service.stage_update(
+        DownloadedUpdate(
+            update=update,
+            archive_path=archive_path,
+            sha256=hashlib.sha256(archive).hexdigest(),
+        )
+    )
+
+    app = staged.source_path
+    current = app / "Contents/Frameworks/Example.framework/Versions/Current"
+    framework = app / "Contents/Frameworks/Example.framework/Example"
+    assert (app / "Contents/MacOS/MailDesk").is_file()
+    assert current.is_symlink() and os.readlink(current) == "A"
+    assert framework.is_symlink()
+    assert staged.content_manifest_path is not None
+    assert json.loads(staged.content_manifest_path.read_text())["schema"] == 2
+    service.release_update_lock()
+
+
+def test_macos_archive_rejects_escaping_symlink(tmp_path: Path) -> None:
+    stream = io.BytesIO()
+    prefix = "MailDesk-v0.3.0-macos-arm64/MailDesk.app"
+    with zipfile.ZipFile(stream, "w") as archive:
+        link = zipfile.ZipInfo(f"{prefix}/Contents/Frameworks/escape")
+        link.create_system = 3
+        link.external_attr = (stat.S_IFLNK | 0o777) << 16
+        archive.writestr(link, "../../../../../../outside")
+    payload = stream.getvalue()
+    path = tmp_path / "escape.zip"
+    path.write_bytes(payload)
+    service = _service(
+        tmp_path,
+        lambda request: None,
+        mode=InstallMode.MACOS_APP,
+        machine="arm64",
+    )
+
+    with pytest.raises(UpdateSecurityError, match="符号链接越界"):
+        service.stage_update(
+            DownloadedUpdate(
+                update=_static_update(InstallMode.MACOS_APP, payload),
+                archive_path=path,
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+        )
+
+
+def test_macos_installer_plan_targets_current_app_bundle(tmp_path: Path) -> None:
+    archive = _macos_zip_payload()
+    update = _static_update(InstallMode.MACOS_APP, archive)
+    service = _service(
+        tmp_path / "service",
+        lambda request: None,
+        mode=InstallMode.MACOS_APP,
+        machine="arm64",
+    )
+    staging = service.updates_dir / "staged-macos"
+    source = staging / "MailDesk.app"
+    new_executable = source / "Contents" / "MacOS" / "MailDesk"
+    new_executable.parent.mkdir(parents=True)
+    new_executable.write_bytes(b"new mac app")
+    new_executable.chmod(0o755)
+    current = tmp_path / "Applications" / "MailDesk.app" / "Contents" / "MacOS" / "MailDesk"
+    current.parent.mkdir(parents=True)
+    current.write_bytes(b"old mac app")
+    current.chmod(0o755)
+
+    plan = service.create_installer_plan(
+        StagedUpdate(update, staging, source),
+        executable_path=current,
+        parent_pid=4321,
+    )
+
+    assert plan.command[0] == "/bin/zsh"
+    assert plan.target_path == current.parents[2].resolve()
+    assert plan.restart_executable == plan.target_path / "Contents/MacOS/MailDesk"
+    assert plan.helper_manifest_path is not None
+    assert plan.helper_manifest_path.is_file()
+    assert len(plan.helper_manifest_sha256) == 64
+    script = plan.script_path.read_text(encoding="utf-8")
+    assert "/usr/bin/ditto" in script
+    assert "failed_and_rolled_back" in script
+    assert "MAILDESK_UPDATE_HEALTH_TOKEN" in script
+    service.release_update_lock()
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="macOS updater is Darwin-only")
+@pytest.mark.parametrize("healthy", [True, False], ids=["success", "rollback"])
+def test_macos_helper_replaces_or_rolls_back_app_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, healthy: bool
+) -> None:
+    archive = _macos_zip_payload()
+    update = _static_update(InstallMode.MACOS_APP, archive)
+    service = _service(
+        tmp_path / "service",
+        lambda request: None,
+        mode=InstallMode.MACOS_APP,
+        machine=platform.machine(),
+    )
+    staging = service.updates_dir / "带 空格 staged macOS"
+    source = staging / "MailDesk.app"
+    new_executable = source / "Contents" / "MacOS" / "MailDesk"
+    new_executable.parent.mkdir(parents=True)
+    if healthy:
+        new_script = (
+            "#!/bin/zsh\n"
+            "printf '%s' \"$MAILDESK_UPDATE_HEALTH_TOKEN\" > \"$MAILDESK_UPDATE_HEALTH_FILE\"\n"
+            "printf '%s' \"$$\" > \"$MAILDESK_UPDATE_HEALTH_FILE.pid\"\n"
+            "sleep 15\n"
+        )
+    else:
+        new_script = "#!/bin/zsh\nexit 7\n"
+    new_executable.write_text(new_script, encoding="utf-8")
+    new_executable.chmod(0o755)
+
+    current = tmp_path / "Applications" / "MailDesk.app" / "Contents" / "MacOS" / "MailDesk"
+    current.parent.mkdir(parents=True)
+    old_marker = tmp_path / "old-restarted.txt"
+    current.write_text(
+        "#!/bin/zsh\n"
+        "printf 'old' > \"$MAILDESK_TEST_OLD_MARKER\"\n"
+        "sleep 8\n",
+        encoding="utf-8",
+    )
+    current.chmod(0o755)
+    old_bytes = current.read_bytes()
+    monkeypatch.setenv("MAILDESK_TEST_OLD_MARKER", str(old_marker))
+
+    parent = subprocess.Popen(["/bin/sleep", "30"])
+    plan = service.create_installer_plan(
+        StagedUpdate(update, staging, source),
+        executable_path=current,
+        parent_pid=parent.pid,
+    )
+    helper = service.launch_installer(plan)
+    service.release_update_lock()
+    parent.terminate()
+    parent.wait(timeout=5)
+
+    return_code = helper.wait(timeout=150)
+    assert plan.result_path is not None
+    result = plan.result_path.read_text(encoding="utf-8").strip()
+    if healthy:
+        assert return_code == 0, result
+        assert result == "success"
+        assert current.read_text(encoding="utf-8") == new_script
+        assert plan.health_path is not None
+        pid_path = plan.health_path.with_name(f"{plan.health_path.name}.pid")
+        if pid_path.is_file():
+            os.kill(int(pid_path.read_text()), 9)
+            pid_path.unlink(missing_ok=True)
+    else:
+        assert return_code == 1, result
+        assert result.splitlines()[0] == "failed_and_rolled_back"
+        assert current.read_bytes() == old_bytes
+        deadline = time.monotonic() + 5
+        while not old_marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert old_marker.read_text() == "old"
     assert not plan.backup_path.exists()
     assert plan.incoming_path is not None and not plan.incoming_path.exists()

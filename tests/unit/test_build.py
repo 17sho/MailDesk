@@ -62,7 +62,7 @@ def test_pyinstaller_spec_embeds_release_version_resource() -> None:
     )
 
     assert 'version=str(ROOT / "assets" / "version_info.txt")' in spec
-    assert "filevers=(0, 3, 2, 0)" in version_info
-    assert "prodvers=(0, 3, 2, 0)" in version_info
-    assert "StringStruct(u'FileVersion', u'0.3.2.0')" in version_info
-    assert "StringStruct(u'ProductVersion', u'0.3.2.0')" in version_info
+    assert "filevers=(0, 3, 3, 0)" in version_info
+    assert "prodvers=(0, 3, 3, 0)" in version_info
+    assert "StringStruct(u'FileVersion', u'0.3.3.0')" in version_info
+    assert "StringStruct(u'ProductVersion', u'0.3.3.0')" in version_info

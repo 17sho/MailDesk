@@ -132,7 +132,7 @@ def test_application_composition_enables_startup_update_checks(qtbot, tmp_path) 
     window._startup_update_timer.stop()
 
     assert window._update_service is not None
-    assert window._update_service.current_version == "0.3.2"
+    assert window._update_service.current_version == "0.3.3"
     assert window._update_service.updates_dir == paths.updates
     assert window.check_updates_action.isEnabled()
 
