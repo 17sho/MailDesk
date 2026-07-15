@@ -43,6 +43,7 @@ jobs:
             unzip -q "artifact-${arch}.zip" -d "artifact-${arch}"
             cp "artifact-${arch}/MailDesk-${RELEASE_TAG}-macos-${arch}.zip" macos-assets/
             cp "artifact-${arch}/MailDesk-${RELEASE_TAG}-macos-${arch}.dmg" macos-assets/
+            cp "artifact-${arch}/SHA256SUMS-${arch}.txt" macos-assets/
           done
           gh release upload "$RELEASE_TAG" macos-assets/* \
             --repo "$GITHUB_REPOSITORY" --clobber
