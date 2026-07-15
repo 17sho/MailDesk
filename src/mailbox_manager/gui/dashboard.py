@@ -219,9 +219,10 @@ class DashboardWidget(QWidget):
         self.content.setMinimumSize(640, 720)
         self.scroll_area.setWidget(self.content)
         layout = QVBoxLayout(self.content)
-        # Let QScrollArea scroll to every panel's actual minimum instead of
-        # squeezing stacked cards into the fixed viewport height.
-        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
+        # Qt's SetMinimumSize constraint rewrites the widget minimum after
+        # queued layout events (629 px on macOS). Keep the constraint manual so
+        # the responsive floor remains deterministic on every platform.
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
         layout.setContentsMargins(26, 22, 26, 26)
         layout.setSpacing(16)
 
@@ -382,8 +383,7 @@ class DashboardWidget(QWidget):
         self.insights_row.setMinimumHeight(270)
         layout.addWidget(self.insights_row, 1)
 
-        # QLayout.SetMinimumSize can replace the earlier explicit minimum with a
-        # platform font-derived value (629 px on macOS). Re-assert the UI contract.
+        # Establish the initial responsive floor after all children exist.
         self.content.setMinimumSize(640, 720)
         self._update_responsive_layout(self.width())
         self.set_quick_actions(quick_action_ids)
@@ -479,13 +479,14 @@ class DashboardWidget(QWidget):
         if content_layout is not None:
             content_layout.invalidate()
             content_layout.activate()
-        # SetMinimumSize is recomputed when Qt activates the layout. On macOS,
-        # that platform-derived value can be 629 px, replacing the explicit
-        # 640 px contract set during construction. Re-apply the floor after
-        # every responsive layout activation so compact windows remain stable.
+            layout_minimum = content_layout.minimumSize()
+        else:
+            layout_minimum = QSize(640, 720)
+        # Preserve the vertical space needed by stacked panels while enforcing
+        # the cross-platform compact-width contract ourselves.
         self.content.setMinimumSize(
-            max(640, self.content.minimumWidth()),
-            max(720, self.content.minimumHeight()),
+            640,
+            max(720, layout_minimum.height()),
         )
 
     def _schedule_scroll_to_top(self) -> None:
