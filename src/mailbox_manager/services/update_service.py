@@ -2031,9 +2031,9 @@ if ! /usr/bin/printf '%s' "$HealthToken" > "$ReadyPath"; then
     exit 3
 fi
 
-Deadline=$(( EPOCHSECONDS + 120 ))
+Deadline=$(( SECONDS + 120 ))
 while /bin/kill -0 "$ParentPid" 2>/dev/null; do
-    if (( EPOCHSECONDS >= Deadline )); then
+    if (( SECONDS >= Deadline )); then
         write_result "parent_exit_timeout"
         exit 4
     fi
@@ -2142,9 +2142,9 @@ MAILDESK_UPDATE_HEALTH_TOKEN="$HealthToken" \
 MAILDESK_UPDATE_HEALTH_FILE="$HealthPath" \
     "$RestartExecutable" >/dev/null 2>&1 &
 NewPid=$!
-Deadline=$(( EPOCHSECONDS + 120 ))
+Deadline=$(( SECONDS + 120 ))
 Healthy=0
-while (( EPOCHSECONDS < Deadline )); do
+while (( SECONDS < Deadline )); do
     if [[ -f "$HealthPath" ]] \
         && [[ "$(/bin/cat "$HealthPath" 2>/dev/null)" == "$HealthToken" ]]; then
         Healthy=1
