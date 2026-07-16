@@ -36,7 +36,12 @@ GITHUB_API_ROOT = "https://api.github.com"
 CHECKSUM_ASSET_NAME = "SHA256SUMS.txt"
 SIGNED_MANIFEST_ASSET_NAME = "MailDesk-update-manifest-v1.json"
 SIGNED_MANIFEST_SIGNATURE_NAME = "MailDesk-update-manifest-v1.sig"
-TRUSTED_UPDATE_PUBLIC_KEY_B64 = "ZGx6G4ac2jh9UG+/NIEKLKKYTM8MdNt52IfHuNoiRts="
+TRUSTED_UPDATE_PUBLIC_KEY_B64 = "/mMJmCQYNZ58XMog58hjXRNZWEHCQjT+nnuISeotU4c="
+LEGACY_UPDATE_PUBLIC_KEY_B64 = "ZGx6G4ac2jh9UG+/NIEKLKKYTM8MdNt52IfHuNoiRts="
+TRUSTED_UPDATE_PUBLIC_KEYS_B64 = (
+    TRUSTED_UPDATE_PUBLIC_KEY_B64,
+    LEGACY_UPDATE_PUBLIC_KEY_B64,
+)
 TRUSTED_GITHUB_DOWNLOAD_HOSTS = frozenset(
     {
         "api.github.com",
@@ -521,14 +526,17 @@ class UpdateService:
             else InstallMode(install_mode)
         )
         self.machine = platform.machine() if machine is None else machine
-        public_key = (
-            base64.b64decode(TRUSTED_UPDATE_PUBLIC_KEY_B64, validate=True)
+        public_keys = (
+            tuple(
+                base64.b64decode(value, validate=True)
+                for value in TRUSTED_UPDATE_PUBLIC_KEYS_B64
+            )
             if trusted_public_key is None
-            else trusted_public_key
+            else (trusted_public_key,)
         )
-        if len(public_key) != 32:
+        if not public_keys or any(len(public_key) != 32 for public_key in public_keys):
             raise ValueError("trusted_public_key 必须是 32 字节 Ed25519 公钥")
-        self._trusted_public_key = bytes(public_key)
+        self._trusted_public_keys = tuple(bytes(public_key) for public_key in public_keys)
         self._transport = transport
         self._timeout_seconds = timeout_seconds
         self._max_api_bytes = max_api_bytes
@@ -1272,13 +1280,19 @@ class UpdateService:
         )
         if len(signature) != 64:
             raise UpdateSecurityError("更新签名格式无效")
-        try:
-            Ed25519PublicKey.from_public_bytes(self._trusted_public_key).verify(
-                signature,
-                manifest_bytes,
-            )
-        except (InvalidSignature, ValueError) as exc:
-            raise UpdateSecurityError("新版本未通过 MailDesk 发布者签名验证") from exc
+        signature_valid = False
+        for public_key in self._trusted_public_keys:
+            try:
+                Ed25519PublicKey.from_public_bytes(public_key).verify(
+                    signature,
+                    manifest_bytes,
+                )
+                signature_valid = True
+                break
+            except (InvalidSignature, ValueError):
+                continue
+        if not signature_valid:
+            raise UpdateSecurityError("新版本未通过 MailDesk 发布者签名验证")
         return _parse_signed_update_manifest(
             manifest_bytes,
             repository=self.repository,

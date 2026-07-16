@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import zipfile
 from pathlib import Path
 
@@ -194,3 +195,29 @@ def test_signed_manifest_rejects_private_key_that_clients_do_not_trust(
             output=tmp_path,
             expected_public_key=b"P" * 32,
         )
+
+
+@pytest.mark.skipif(platform.system() != "Windows", reason="DPAPI is Windows-only")
+def test_release_private_key_can_be_protected_by_dpapi(tmp_path: Path) -> None:
+    import win32crypt
+
+    private_key = Ed25519PrivateKey.generate()
+    private_pem = private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    protected_path = tmp_path / "release-key.pem.dpapi"
+    protected_path.write_bytes(
+        win32crypt.CryptProtectData(private_pem, "MailDesk test", None, None, None, 0x1)
+    )
+
+    loaded = release.load_release_private_key(protected_path)
+
+    assert loaded.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ) == private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )

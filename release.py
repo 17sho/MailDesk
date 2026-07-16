@@ -23,7 +23,12 @@ DEFAULT_OUTPUT = ROOT / "artifacts" / "releases"
 DEFAULT_REPOSITORY = "17sho/MailDesk"
 SIGNED_MANIFEST_ASSET_NAME = "MailDesk-update-manifest-v1.json"
 SIGNED_MANIFEST_SIGNATURE_NAME = "MailDesk-update-manifest-v1.sig"
-TRUSTED_UPDATE_PUBLIC_KEY_B64 = "ZGx6G4ac2jh9UG+/NIEKLKKYTM8MdNt52IfHuNoiRts="
+TRUSTED_UPDATE_PUBLIC_KEY_B64 = "/mMJmCQYNZ58XMog58hjXRNZWEHCQjT+nnuISeotU4c="
+LEGACY_UPDATE_PUBLIC_KEY_B64 = "ZGx6G4ac2jh9UG+/NIEKLKKYTM8MdNt52IfHuNoiRts="
+TRUSTED_UPDATE_PUBLIC_KEYS_B64 = (
+    TRUSTED_UPDATE_PUBLIC_KEY_B64,
+    LEGACY_UPDATE_PUBLIC_KEY_B64,
+)
 
 RUNTIME_DISTRIBUTIONS = (
     "PySide6",
@@ -88,6 +93,31 @@ def write_checksum_file(paths: tuple[Path, ...], target: Path) -> Path:
     return target
 
 
+def load_release_private_key(signing_key: Path) -> Ed25519PrivateKey:
+    try:
+        key_data = signing_key.read_bytes()
+        if signing_key.suffix.casefold() == ".dpapi":
+            if platform.system() != "Windows":
+                raise RuntimeError("DPAPI 发布密钥只能在创建它的 Windows 用户下使用")
+            import win32crypt
+
+            _description, key_data = win32crypt.CryptUnprotectData(
+                key_data,
+                None,
+                None,
+                None,
+                0x1,
+            )
+        private_key = serialization.load_pem_private_key(key_data, password=None)
+    except RuntimeError:
+        raise
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError("无法读取 Ed25519 发布签名私钥") from exc
+    if not isinstance(private_key, Ed25519PrivateKey):
+        raise RuntimeError("发布签名私钥不是 Ed25519 密钥")
+    return private_key
+
+
 def build_signed_update_manifest(
     archives: tuple[Path, ...],
     *,
@@ -122,25 +152,20 @@ def build_signed_update_manifest(
         raise ValueError("macOS 自动更新 ZIP 必须同时包含 arm64 与 x64")
     if names.intersection(macos_dmg_names) not in (set(), macos_dmg_names):
         raise ValueError("macOS DMG 必须同时包含 arm64 与 x64")
-    try:
-        private_key = serialization.load_pem_private_key(
-            signing_key.read_bytes(),
-            password=None,
-        )
-    except (OSError, ValueError, TypeError) as exc:
-        raise RuntimeError("无法读取 Ed25519 发布签名私钥") from exc
-    if not isinstance(private_key, Ed25519PrivateKey):
-        raise RuntimeError("发布签名私钥不是 Ed25519 密钥")
+    private_key = load_release_private_key(signing_key)
     public_key = private_key.public_key().public_bytes(
         serialization.Encoding.Raw,
         serialization.PublicFormat.Raw,
     )
-    trusted_key = (
-        base64.b64decode(TRUSTED_UPDATE_PUBLIC_KEY_B64, validate=True)
+    trusted_keys = (
+        {
+            base64.b64decode(value, validate=True)
+            for value in TRUSTED_UPDATE_PUBLIC_KEYS_B64
+        }
         if expected_public_key is None
-        else expected_public_key
+        else {expected_public_key}
     )
-    if public_key != trusted_key:
+    if public_key not in trusted_keys:
         raise RuntimeError("发布签名私钥与客户端内置公钥不匹配")
 
     payload = {

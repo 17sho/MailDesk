@@ -43,7 +43,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && python -m pip install -r requirements-dev.txt
       - name: Ruff
-        run: python -m ruff check src tests build.py build_macos.py release.py
+        run: >-
+          python -m ruff check src tests build.py build_macos.py release.py
+          tools/generate_release_signing_key.py
       - name: Test
         run: python -m pytest -q
       - name: Build MailDesk.app

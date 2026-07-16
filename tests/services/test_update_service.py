@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -20,6 +21,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+import mailbox_manager.services.update_service as update_service_module
 from mailbox_manager.services.update_service import (
     CHECKSUM_ASSET_NAME,
     SIGNED_MANIFEST_ASSET_NAME,
@@ -492,6 +494,43 @@ def test_update_check_requires_valid_offline_publisher_signature(tmp_path: Path)
     )
     with pytest.raises(UpdateSecurityError, match=r"缺少.*发布签名"):
         unsigned_service.check_for_update()
+
+
+def test_update_check_accepts_fallback_trusted_signing_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    archive = _zip_payload(InstallMode.ONEFILE)
+    payload = _release_payload(archive)
+    unrelated_key = Ed25519PrivateKey.generate().public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    monkeypatch.setattr(
+        update_service_module,
+        "TRUSTED_UPDATE_PUBLIC_KEYS_B64",
+        (
+            base64.b64encode(unrelated_key).decode("ascii"),
+            base64.b64encode(_TEST_PUBLIC_KEY).decode("ascii"),
+        ),
+    )
+
+    def transport(request: httpx.Request) -> httpx.Response:
+        content = _SIGNED_FIXTURES.get(str(request.url))
+        if content is not None:
+            return httpx.Response(200, content=content, request=request)
+        return _json_response(request, payload)
+
+    service = UpdateService(
+        current_version="0.2.0",
+        updates_dir=tmp_path / "updates",
+        install_mode=InstallMode.ONEFILE,
+        transport=httpx.MockTransport(transport),
+    )
+
+    update = service.check_for_update()
+
+    assert update is not None
+    assert update.release.version == "0.3.0"
 
 
 @pytest.mark.parametrize(
