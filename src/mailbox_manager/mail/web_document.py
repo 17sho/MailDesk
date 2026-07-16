@@ -44,7 +44,6 @@ _LEADING_PREHEADER_PATTERN = re.compile(
     r"(?P<div><div\b[^>]*>(?P<body>.*?)</div>)\s*(?=<table\b)"
 )
 _LAZY_SOURCE_ATTRIBUTES = ("data-src", "data-original", "data-lazy-src")
-_TRACKING_PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="
 
 _ALLOWED_TAGS = {
     "a",
@@ -209,24 +208,10 @@ def _preferred_image_source(values: dict[str, str]) -> str:
     return ""
 
 
-def _is_tracking_pixel(values: dict[str, str], source: str) -> bool:
-    dimensions: list[int] = []
-    for name in ("width", "height"):
-        raw = values.get(name, "").strip()
-        if raw.isdigit():
-            dimensions.append(int(raw))
-    if len(dimensions) == 2 and max(dimensions) <= 2:
-        return True
-    path = urlsplit(source).path.casefold()
-    return any(marker in path for marker in ("/open.php", "/pixel.", "/tracking."))
-
-
 def _replace_css_urls(
     value: str,
     *,
     inline_images: dict[str, tuple[str, bytes]],
-    remote_images: dict[str, tuple[str, bytes]],
-    remote_policy: str,
 ) -> str:
     css = _CSS_IMPORT_PATTERN.sub("", value[:200_000])
     if _CSS_DANGEROUS_PATTERN.search(css):
@@ -244,13 +229,7 @@ def _replace_css_urls(
             image = inline_images.get(content_id)
             if image:
                 rendered = _data_image_uri(*image)
-        elif lowered.startswith(("http://", "https://")):
-            image = remote_images.get(normalized)
-            if image:
-                rendered = _data_image_uri(*image)
-            elif remote_policy == "preserve":
-                rendered = normalized
-        elif lowered.startswith("data:"):
+        elif lowered.startswith(("http://", "https://", "data:")):
             rendered = normalized
         return f'url("{rendered}")' if rendered else "none"
 
@@ -262,8 +241,6 @@ class _WebHtmlSanitizer(HTMLParser):
         self,
         *,
         inline_images: dict[str, tuple[str, bytes]],
-        remote_images: dict[str, tuple[str, bytes]],
-        remote_policy: str,
     ) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
@@ -273,8 +250,6 @@ class _WebHtmlSanitizer(HTMLParser):
         self._inline_images = {
             key.strip().strip("<>").casefold(): value for key, value in inline_images.items()
         }
-        self._remote_images = remote_images
-        self._remote_policy = remote_policy
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag = tag.casefold()
@@ -342,8 +317,6 @@ class _WebHtmlSanitizer(HTMLParser):
                 _replace_css_urls(
                     data,
                     inline_images=self._inline_images,
-                    remote_images=self._remote_images,
-                    remote_policy=self._remote_policy,
                 )
             )
             return
@@ -373,8 +346,6 @@ class _WebHtmlSanitizer(HTMLParser):
             cleaned_style = _replace_css_urls(
                 style,
                 inline_images=self._inline_images,
-                remote_images=self._remote_images,
-                remote_policy=self._remote_policy,
             )
             if cleaned_style.strip():
                 safe.append(("style", cleaned_style[:20_000]))
@@ -420,28 +391,15 @@ class _WebHtmlSanitizer(HTMLParser):
     def _append_image(self, values: dict[str, str]) -> None:
         source = _preferred_image_source(values)
         alt = repair_mojibake(values.get("alt", "").strip())[:500]
-        tracking = _is_tracking_pixel(values, source)
         rendered_source = ""
-        if tracking:
-            rendered_source = _TRACKING_PIXEL
-        elif source.casefold().startswith("cid:"):
+        if source.casefold().startswith("cid:"):
             content_id = source[4:].strip().strip("<>").casefold()
             image = self._inline_images.get(content_id)
             if image:
                 rendered_source = _data_image_uri(*image)
-        elif source.casefold().startswith(("http://", "https://")):
-            image = self._remote_images.get(source)
-            if image:
-                rendered_source = _data_image_uri(*image)
-            elif self._remote_policy == "preserve":
-                rendered_source = source
-            else:
-                rendered_source = _TRACKING_PIXEL
-        elif source.casefold().startswith("data:"):
+        elif source.casefold().startswith(("http://", "https://", "data:")):
             rendered_source = source
         classes = _SAFE_CLASS_PATTERN.sub("", values.get("class", ""))[:500].split()
-        if tracking:
-            classes.append("maildesk-tracking-pixel")
         path = urlsplit(source).path.casefold()
         if "logo" in path or "wordmark" in path:
             classes.append("maildesk-brand-image")
@@ -461,8 +419,6 @@ class _WebHtmlSanitizer(HTMLParser):
             cleaned_style = _replace_css_urls(
                 style,
                 inline_images=self._inline_images,
-                remote_images=self._remote_images,
-                remote_policy=self._remote_policy,
             )
             if cleaned_style.strip():
                 safe.append(("style", cleaned_style[:20_000]))
@@ -491,8 +447,6 @@ td, th { max-width: 100%; }
 img { max-width: 100% !important; height: auto; }
 img.maildesk-brand-image { display: block; width: auto !important;
   max-width: 220px !important; height: auto !important; }
-img.maildesk-tracking-pixel { display: none !important; width: 0 !important;
-  height: 0 !important; opacity: 0 !important; }
 p, li { line-height: 1.55; }
 a { color: #0f9f85; }
 pre, code { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -508,17 +462,11 @@ def sanitize_email_web_source(
     value: str,
     *,
     inline_images: dict[str, tuple[str, bytes]] | None = None,
-    remote_images: dict[str, tuple[str, bytes]] | None = None,
-    remote_policy: str = "block",
 ) -> str:
     """Retain static email layout while removing active and unsafe content."""
 
-    if remote_policy not in {"block", "preserve", "embed"}:
-        raise ValueError("不支持的网络图片策略")
     parser = _WebHtmlSanitizer(
         inline_images=inline_images or {},
-        remote_images=remote_images or {},
-        remote_policy=remote_policy,
     )
     parser.feed(normalize_email_html(value[:MAX_HTML_SOURCE_LENGTH]))
     parser.close()
@@ -529,23 +477,18 @@ def prepare_email_web_document(
     value: str,
     *,
     inline_images: dict[str, tuple[str, bytes]] | None = None,
-    remote_images: dict[str, tuple[str, bytes]] | None = None,
-    remote_policy: str = "block",
     preheader_hint: str = "",
 ) -> str:
     """Create an isolated, browser-quality HTML document for an email body.
 
     Layout CSS and static markup are retained, while active content, event handlers,
-    unsafe URLs and external stylesheets are removed. The GUI additionally blocks every
-    network request from the embedded browser; remote images are only visible after the
-    bounded downloader converts them to data URIs.
+    unsafe URLs and external stylesheets are removed. Extracted image URLs remain
+    available to the reader while non-image browser requests are blocked by the GUI.
     """
 
     fragment = sanitize_email_web_source(
         value,
         inline_images=inline_images or {},
-        remote_images=remote_images or {},
-        remote_policy=remote_policy,
     )
     fragment = _hide_matching_leading_preheader(fragment, preheader_hint)
     document = (
@@ -598,63 +541,3 @@ def prepare_plain_web_document(value: str) -> str:
         + ".maildesk-plain{white-space:normal;line-height:1.6;font-size:15px;}</style>"
         "</body></html>"
     )
-
-
-class _WebRemoteImageCollector(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.urls: list[str] = []
-        self._style_depth = 0
-        self._blocked_depth = 0
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.casefold()
-        if self._blocked_depth:
-            if tag in _ACTIVE_CONTAINER_TAGS:
-                self._blocked_depth += 1
-            return
-        if tag in _ACTIVE_CONTAINER_TAGS:
-            self._blocked_depth = 1
-            return
-        if tag == "style":
-            self._style_depth += 1
-            return
-        values = {name.casefold(): (value or "") for name, value in attrs}
-        if tag == "img":
-            source = _preferred_image_source(values)
-            if not _is_tracking_pixel(values, source):
-                self._append(source)
-        if tag == "source":
-            for candidate in _SRCSET_SPLIT.split(values.get("srcset", "")[:16_384]):
-                self._append(_SRCSET_DESCRIPTOR.sub("", candidate.strip()))
-        self._collect_css(values.get("style", ""))
-        self._append(values.get("background", ""))
-
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.casefold()
-        if self._blocked_depth:
-            if tag in _ACTIVE_CONTAINER_TAGS:
-                self._blocked_depth = max(0, self._blocked_depth - 1)
-            return
-        if tag == "style":
-            self._style_depth = max(0, self._style_depth - 1)
-
-    def handle_data(self, data: str) -> None:
-        if self._style_depth and not self._blocked_depth:
-            self._collect_css(data)
-
-    def _collect_css(self, css: str) -> None:
-        for match in _CSS_URL_PATTERN.finditer(css[:200_000]):
-            self._append(next((item for item in match.groups() if item is not None), ""))
-
-    def _append(self, value: str) -> None:
-        normalized = _normalize_reference(value)
-        if normalized.casefold().startswith(("http://", "https://")):
-            self.urls.append(normalized)
-
-
-def web_remote_image_urls(value: str) -> tuple[str, ...]:
-    collector = _WebRemoteImageCollector()
-    collector.feed(normalize_email_html(value[:MAX_HTML_SOURCE_LENGTH]))
-    collector.close()
-    return tuple(dict.fromkeys(collector.urls))

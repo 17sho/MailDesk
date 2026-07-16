@@ -109,7 +109,6 @@ from mailbox_manager.gui.update_dialog import UpdateDialog, UpdateDialogState
 from mailbox_manager.gui.workers import (
     DiscoveryWorker,
     FetchWorker,
-    RemoteImageWorker,
     SecurityAuditWorker,
     SecurityConsentWorker,
     SendBatchWorker,
@@ -311,18 +310,15 @@ class MainWindow(QMainWindow):
         self._security_workers: dict[int, SecurityAuditWorker] = {}
         self._security_consent_workers: dict[int, SecurityConsentWorker] = {}
         self._security_consent_dialogs: dict[int, QMessageBox] = {}
-        self._remote_image_workers: dict[int, RemoteImageWorker] = {}
         self._translation_workers: dict[int, TranslationWorker] = {}
         self._message_generation = 0
         self._translation_generation = 0
         self._active_translation_generation: int | None = None
-        self._current_html_body = ""
         self._rendered_html_fragment = ""
         self._original_plain_text = ""
         self._translation_source_text = ""
         self._translated_text = ""
         self._showing_translation = False
-        self._current_remote_image_count = 0
         self._current_message: MailMessage | None = None
         self._visible_message_attachments: tuple[MailAttachment, ...] = ()
         self._current_attachment_gallery = ""
@@ -1072,35 +1068,24 @@ class MainWindow(QMainWindow):
         body_layout = QVBoxLayout(body_tab)
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
-        self.message_image_bar = QFrame()
-        self.message_image_bar.setObjectName("messageImageBar")
-        image_bar_layout = QHBoxLayout(self.message_image_bar)
-        image_bar_layout.setContentsMargins(10, 6, 8, 6)
-        image_bar_layout.setSpacing(8)
-        self.message_image_label = QLabel("网络图片已阻止")
-        self.message_image_label.setObjectName("imageStatusLabel")
-        self.message_image_label.setMinimumWidth(0)
-        self.message_image_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
-        image_bar_layout.addWidget(self.message_image_label)
-        self.load_remote_images_button = QPushButton("加载网络图片")
-        self.load_remote_images_button.setObjectName("remoteImageButton")
-        self.load_remote_images_button.clicked.connect(self._load_remote_images)
-        image_bar_layout.addWidget(self.load_remote_images_button)
-        image_bar_layout.addStretch(1)
+        self.message_tools_bar = QFrame()
+        self.message_tools_bar.setObjectName("mailTranslationBar")
+        message_tools_layout = QHBoxLayout(self.message_tools_bar)
+        message_tools_layout.setContentsMargins(10, 6, 8, 6)
+        message_tools_layout.setSpacing(8)
+        message_tools_layout.addStretch(1)
         translation_confirmation = " · 翻译前确认" if self._translation_confirm else ""
         self.translation_language_label = QLabel(
             f"目标语言：{translation_language_label(self._translation_language)}"
             f"{translation_confirmation}"
         )
         self.translation_language_label.setObjectName("mailTranslationLanguage")
-        image_bar_layout.addWidget(self.translation_language_label)
+        message_tools_layout.addWidget(self.translation_language_label)
         self.translation_toggle_button = QPushButton("查看译文")
         self.translation_toggle_button.setObjectName("translationToggleButton")
         self.translation_toggle_button.setEnabled(False)
         self.translation_toggle_button.clicked.connect(self._toggle_translation_view)
-        image_bar_layout.addWidget(self.translation_toggle_button)
+        message_tools_layout.addWidget(self.translation_toggle_button)
         self.translate_button = QPushButton("翻译邮件")
         self.translate_button.setObjectName("translationButton")
         self.translate_button.setToolTip(
@@ -1108,9 +1093,9 @@ class MainWindow(QMainWindow):
         )
         self.translate_button.setEnabled(False)
         self.translate_button.clicked.connect(self._translate_current_message)
-        image_bar_layout.addWidget(self.translate_button)
-        self.message_image_bar.hide()
-        body_layout.addWidget(self.message_image_bar)
+        message_tools_layout.addWidget(self.translate_button)
+        self.message_tools_bar.hide()
+        body_layout.addWidget(self.message_tools_bar)
         self.message_attachment_panel = QFrame()
         self.message_attachment_panel.setObjectName("mailAttachmentPanel")
         attachment_layout = QVBoxLayout(self.message_attachment_panel)
@@ -1936,16 +1921,6 @@ class MainWindow(QMainWindow):
             confirmed_actions=bool(values.get("confirm_actions", False)),
         )
 
-    def _auto_load_images_enabled(self) -> bool:
-        if self._settings is None:
-            return False
-        values = self._settings.get("fetch", {})
-        return bool(
-            values.get("auto_load_images", True)
-            if isinstance(values, dict)
-            else True
-        )
-
     def _start_fetch_group(self, group_id: int | None) -> None:
         group_ids = [group_id] if group_id is not None else None
         if group_id is not None and self._groups is not None:
@@ -2160,15 +2135,13 @@ class MainWindow(QMainWindow):
         else:
             self._message_generation += 1
             self._invalidate_translation()
-            self._current_html_body = ""
             self._rendered_html_fragment = ""
             self._original_plain_text = ""
             self._translation_source_text = ""
-            self._current_remote_image_count = 0
             self._current_message = None
             self._current_attachment_gallery = ""
             self._populate_message_attachments(())
-            self.message_image_bar.hide()
+            self.message_tools_bar.hide()
             self.message_body.clear()
             self.match_view.clear()
             self.message_context_label.setText(empty_text)
@@ -2334,7 +2307,6 @@ class MainWindow(QMainWindow):
             dark=self._dark,
             selected_message_id=selected_message_id,
             message_repository=self._messages,
-            auto_load_remote_images=self._auto_load_images_enabled(),
             translation_service=self._translation_service,
             translation_language=self._translation_language,
             translation_confirm=self._translation_confirm,
@@ -2388,24 +2360,14 @@ class MainWindow(QMainWindow):
         if message.catch_all_recipient:
             context.append(f"路由至 {message.catch_all_recipient}")
         self.message_context_label.setText("  ·  ".join(context))
-        self.load_remote_images_button.setEnabled(True)
-        self.load_remote_images_button.setText("加载网络图片")
         display_content = select_stored_message_display_content(message)
-        self._current_html_body = display_content.source_html
-        remote_count = display_content.remote_image_count
-        self._current_remote_image_count = remote_count
         self._original_plain_text = display_content.plain_text
         self._translation_source_text = clean_message_text(message.text_body)
         if not self._translation_source_text:
             self._translation_source_text = clean_message_text(
                 display_content.html_fragment or display_content.source_html
             )
-        self.message_image_bar.show()
-        self.message_image_label.setVisible(remote_count > 0)
-        self.load_remote_images_button.setVisible(remote_count > 0)
-        self.message_image_label.setText(
-            f"已阻止 {remote_count} 张网络图片，避免泄露阅读状态"
-        )
+        self.message_tools_bar.show()
         if display_content.uses_html:
             self._rendered_html_fragment = display_content.source_html
             self._render_email_html(self._rendered_html_fragment)
@@ -2419,8 +2381,6 @@ class MainWindow(QMainWindow):
             else:
                 self._rendered_html_fragment = ""
                 self.message_body.setPlainText(plain_text)
-        if remote_count and self._auto_load_images_enabled():
-            QTimer.singleShot(0, self._load_remote_images)
         self.match_view.setPlainText("\n".join(message.matched_values) or "未提取到匹配内容")
         self._refresh_translation_controls()
 
@@ -2428,9 +2388,7 @@ class MainWindow(QMainWindow):
         if self._current_message is None:
             return
         self._showing_translation = False
-        self.message_image_bar.show()
-        self.message_image_label.setVisible(self._current_remote_image_count > 0)
-        self.load_remote_images_button.setVisible(self._current_remote_image_count > 0)
+        self.message_tools_bar.show()
         if self._rendered_html_fragment:
             self._render_email_html(self._rendered_html_fragment)
         else:
@@ -2442,9 +2400,7 @@ class MainWindow(QMainWindow):
         if not self._translated_text:
             return
         self._showing_translation = True
-        self.message_image_bar.show()
-        self.message_image_label.hide()
-        self.load_remote_images_button.hide()
+        self.message_tools_bar.show()
         self.message_body.setPlainText(self._translated_text)
         self.translation_toggle_button.setText("查看原文")
 
@@ -2581,7 +2537,6 @@ class MainWindow(QMainWindow):
         self.message_body.setHtml(
             prepare_email_web_document(
                 source,
-                remote_policy="block",
                 preheader_hint=subject,
             )
         )
@@ -2729,39 +2684,6 @@ class MainWindow(QMainWindow):
         )
         if answer == QMessageBox.StandardButton.Yes:
             QDesktopServices.openUrl(url)
-
-    def _load_remote_images(self) -> None:
-        if not self._current_html_body or self._showing_translation:
-            return
-        generation = self._message_generation
-        self.load_remote_images_button.setEnabled(False)
-        self.load_remote_images_button.setText("正在加载…")
-        self.message_image_label.setText("正在安全下载网络图片…")
-        worker = RemoteImageWorker(generation, self._current_html_body)
-        worker.signals.result.connect(self._remote_images_loaded)
-        worker.signals.finished.connect(self._remote_images_finished)
-        self._remote_image_workers[generation] = worker
-        self._pool.start(worker)
-
-    def _remote_images_loaded(
-        self, generation: int, rendered: str, loaded: int, total: int
-    ) -> None:
-        if generation != self._message_generation:
-            return
-        if rendered:
-            self._rendered_html_fragment = rendered
-            if not self._showing_translation:
-                self._render_email_html(rendered)
-        if loaded:
-            self.message_image_label.setText(f"已加载 {loaded}/{total} 张网络图片")
-            self.load_remote_images_button.setText("重新加载")
-        else:
-            self.message_image_label.setText("网络图片加载失败或被安全策略拦截")
-            self.load_remote_images_button.setText("重试")
-        self.load_remote_images_button.setEnabled(True)
-
-    def _remote_images_finished(self, generation: int) -> None:
-        self._remote_image_workers.pop(generation, None)
 
     def toggle_theme(self) -> None:
         self._apply_appearance_preferences(
@@ -3704,7 +3626,6 @@ class MainWindow(QMainWindow):
                             "folders",
                             "max_messages",
                             "include_special",
-                            "auto_load_images",
                             "extract_keywords",
                             "extract_pattern",
                             "post_action",

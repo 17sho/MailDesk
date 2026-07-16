@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from mailbox_manager.domain.models import EmailAccount, MailAttachment, MailMessage
 from mailbox_manager.gui.email_body_view import EmailBodyView
-from mailbox_manager.gui.workers import RemoteImageWorker, TranslationWorker
+from mailbox_manager.gui.workers import TranslationWorker
 from mailbox_manager.mail.display import (
     MessageDisplayContent,
     select_stored_message_display_content,
@@ -57,7 +57,6 @@ class MailViewerDialog(QDialog):
         dark: bool = False,
         selected_message_id: int | None = None,
         message_repository: MessageRepository | None = None,
-        auto_load_remote_images: bool = False,
         translation_service: TranslationService | None = None,
         translation_language: str = DEFAULT_TRANSLATION_LANGUAGE,
         translation_confirm: bool = True,
@@ -72,20 +71,16 @@ class MailViewerDialog(QDialog):
         self.account_id = account.account_id or 0
         self._account = account
         self._message_repository = message_repository
-        self._auto_load_remote_images = auto_load_remote_images
         self._translation_service = translation_service or TranslationService()
         self._translation_language = _valid_translation_language(translation_language)
         self._translation_confirm = bool(translation_confirm)
         self._messages: list[MailMessage] = []
         self._dark = dark
         self._pool = QThreadPool(self)
-        self._remote_workers: dict[int, RemoteImageWorker] = {}
         self._translation_workers: dict[int, TranslationWorker] = {}
         self._render_generation = 0
         self._translation_generation = 0
         self._active_translation_generation: int | None = None
-        self._current_html = ""
-        self._loaded_remote_html = ""
         self._current_message: MailMessage | None = None
         self._current_display_content: MessageDisplayContent | None = None
         self._translation_source_text = ""
@@ -178,20 +173,6 @@ class MailViewerDialog(QDialog):
         content_layout.addWidget(self.meta_label)
         self._build_translation_bar(content_layout)
         self._build_attachment_panel(content_layout)
-        self.image_bar = QFrame()
-        self.image_bar.setObjectName("messageImageBar")
-        image_layout = QHBoxLayout(self.image_bar)
-        image_layout.setContentsMargins(10, 6, 8, 6)
-        self.image_label = QLabel("网络图片已阻止")
-        self.image_label.setObjectName("messageImageLabel")
-        image_layout.addWidget(self.image_label)
-        image_layout.addStretch(1)
-        self.load_images_button = QPushButton("加载网络图片")
-        self.load_images_button.setObjectName("remoteImageButton")
-        self.load_images_button.clicked.connect(self._load_remote_images)
-        image_layout.addWidget(self.load_images_button)
-        self.image_bar.hide()
-        content_layout.addWidget(self.image_bar)
         self.body = EmailBodyView()
         self.body.setObjectName("mailViewerBody")
         self.body.anchorClicked.connect(self._open_link)
@@ -366,8 +347,6 @@ class MailViewerDialog(QDialog):
         self._populate_attachments(message.attachments)
         display_content = select_stored_message_display_content(message)
         self._current_display_content = display_content
-        self._current_html = display_content.source_html
-        self._loaded_remote_html = ""
         self._translation_source_text = clean_message_text(message.text_body)
         if not self._translation_source_text and message.text_body.strip():
             self._translation_source_text = message.text_body.replace("\x00", "").strip()
@@ -377,24 +356,14 @@ class MailViewerDialog(QDialog):
             )
         self._refresh_translation_controls()
         self._render_original_view()
-        remote_count = display_content.remote_image_count
-        if remote_count and self._auto_load_remote_images:
-            QTimer.singleShot(0, self._load_remote_images)
 
     def _render_original_view(self) -> None:
         display_content = self._current_display_content
         if display_content is None:
             return
         self._showing_translation = False
-        remote_count = display_content.remote_image_count
-        self.image_bar.setVisible(remote_count > 0)
-        self.image_label.setText(
-            f"已阻止 {remote_count} 张网络图片，避免泄露阅读状态"
-            if not self._loaded_remote_html
-            else self.image_label.text()
-        )
         if display_content.uses_html:
-            self._render_html(self._loaded_remote_html or display_content.source_html)
+            self._render_html(display_content.source_html)
         else:
             self._render_plain_body(display_content.plain_text)
         if self._translated_text:
@@ -413,7 +382,6 @@ class MailViewerDialog(QDialog):
         if not self._translated_text:
             return
         self._showing_translation = True
-        self.image_bar.hide()
         self._render_plain_body(self._translated_text)
         self.translation_toggle_button.setText("查看原文")
         self.translation_toggle_button.show()
@@ -655,7 +623,6 @@ class MailViewerDialog(QDialog):
         self.body.setHtml(
             prepare_email_web_document(
                 fragment + self._attachment_gallery_html(),
-                remote_policy="block",
                 preheader_hint=(
                     self._current_message.subject if self._current_message else ""
                 ),
@@ -690,37 +657,6 @@ class MailViewerDialog(QDialog):
             if figures
             else ""
         )
-
-    def _load_remote_images(self) -> None:
-        if not self._current_html or self._showing_translation:
-            return
-        generation = self._render_generation
-        self.load_images_button.setEnabled(False)
-        self.image_label.setText("正在安全下载网络图片…")
-        worker = RemoteImageWorker(generation, self._current_html)
-        worker.signals.result.connect(self._remote_images_loaded)
-        worker.signals.finished.connect(self._remote_images_finished)
-        self._remote_workers[generation] = worker
-        self._pool.start(worker)
-
-    def _remote_images_loaded(
-        self, generation: int, rendered: str, loaded: int, total: int
-    ) -> None:
-        if generation != self._render_generation:
-            return
-        if rendered:
-            self._loaded_remote_html = rendered
-            if not self._showing_translation:
-                self._render_html(rendered)
-        self.image_label.setText(
-            f"已加载 {loaded}/{total} 张网络图片"
-            if loaded
-            else "网络图片加载失败或被安全策略拦截"
-        )
-        self.load_images_button.setEnabled(True)
-
-    def _remote_images_finished(self, generation: int) -> None:
-        self._remote_workers.pop(generation, None)
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self._closed = True

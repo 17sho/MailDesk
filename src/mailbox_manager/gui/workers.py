@@ -6,7 +6,6 @@ from PySide6.QtCore import QObject, QRunnable, Signal, Slot
 
 from mailbox_manager.domain.models import EmailAccount, FetchRequest
 from mailbox_manager.domain.status import AccountStatus
-from mailbox_manager.mail.remote_images import load_remote_images_for_web
 from mailbox_manager.protocols.oauth import OAuthTokenProvider
 from mailbox_manager.protocols.smtp_client import SmtpClient
 from mailbox_manager.services.discovery_service import DiscoveryService
@@ -179,29 +178,6 @@ class SecurityConsentWorker(QRunnable):
         finally:
             service.close()
             self.signals.finished.emit(account_id)
-
-
-class RemoteImageSignals(QObject):
-    result = Signal(int, str, int, int)
-    finished = Signal(int)
-
-
-class RemoteImageWorker(QRunnable):
-    def __init__(self, generation: int, html_body: str) -> None:
-        super().__init__()
-        self.generation = generation
-        self.html_body = html_body
-        self.signals = RemoteImageSignals()
-
-    @Slot()
-    def run(self) -> None:
-        try:
-            rendered, loaded, total = load_remote_images_for_web(self.html_body)
-            self.signals.result.emit(self.generation, rendered, loaded, total)
-        except Exception:
-            self.signals.result.emit(self.generation, "", 0, 0)
-        finally:
-            self.signals.finished.emit(self.generation)
 
 
 class TranslationSignals(QObject):

@@ -30,7 +30,7 @@ def test_email_body_view_is_browser_quality_and_security_is_locked_down(qtbot) -
         settings.testAttribute(
             QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls
         )
-        is False
+        is True
     )
     assert (
         settings.testAttribute(QWebEngineSettings.WebAttribute.LocalStorageEnabled)
@@ -38,15 +38,20 @@ def test_email_body_view_is_browser_quality_and_security_is_locked_down(qtbot) -
     )
 
 
-def test_email_body_view_blocks_browser_network_requests(qtbot) -> None:
+def test_email_body_view_loads_images_but_blocks_other_network_resources(qtbot) -> None:
     view = EmailBodyView()
     qtbot.addWidget(view)
     view.setHtml(
-        '<html><body><img src="https://network-must-not-run.invalid/pixel.png">'
+        '<html><head><link rel="stylesheet" '
+        'href="https://network-must-not-run.invalid/style.css"></head><body>'
+        '<img src="https://images-load-directly.invalid/banner.png">'
         "安全正文</body></html>"
     )
 
-    qtbot.waitUntil(lambda: view.blocked_request_count > 0, timeout=5_000)
+    qtbot.waitUntil(
+        lambda: view.blocked_request_count > 0
+        and view.allowed_image_request_count > 0,
+        timeout=5_000,
+    )
 
     assert "安全正文" in view.toPlainText()
-

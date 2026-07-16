@@ -110,9 +110,7 @@ def test_main_toolbar_translates_and_toggles_original_without_confirmation(
     monkeypatch.setattr(window._pool, "start", lambda worker: worker.run())
 
     assert "日语" in window.translation_language_label.text()
-    assert window.message_image_bar.isHidden() is False
-    assert window.message_image_label.isHidden() is True
-    assert window.load_remote_images_button.isHidden() is True
+    assert window.message_tools_bar.isHidden() is False
     assert window.main_tabs.tabBar().expanding() is False
     assert window.main_tabs.tabBar().drawBase() is False
     assert window.main_tabs.tabBar().usesScrollButtons() is False
@@ -161,28 +159,20 @@ def test_stale_translation_result_cannot_cross_into_new_message(
     assert window.message_body.toPlainText() == "New original body"
 
 
-def test_remote_image_and_theme_updates_do_not_overwrite_translation(
+def test_theme_updates_do_not_overwrite_translation(
     qtbot, tmp_path, monkeypatch
 ) -> None:
     service = FakeTranslationService("保持显示的译文")
     window, _settings = _window(qtbot, tmp_path, service)
     monkeypatch.setattr(window._pool, "start", lambda worker: worker.run())
     window._translate_current_message()
-    generation = window._message_generation
-
-    window._remote_images_loaded(
-        generation,
-        "<p>网络图片加载后的原文</p>",
-        1,
-        1,
-    )
     assert window.message_body.toPlainText() == "保持显示的译文"
 
     window.toggle_theme()
     assert window.message_body.toPlainText() == "保持显示的译文"
 
     window.translation_toggle_button.click()
-    assert "网络图片加载后的原文" in window.message_body.toPlainText()
+    assert "Original message body" in window.message_body.toPlainText()
 
 
 def test_settings_change_applies_immediately_to_main_and_open_reader(

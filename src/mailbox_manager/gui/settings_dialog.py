@@ -284,16 +284,11 @@ class EnterpriseSettingsDialog(QDialog):
         )
         self.include_special = QCheckBox("同时扫描垃圾邮件与已删除邮件")
         self.include_special.setChecked(bool(values.get("include_special", False)))
-        self.auto_load_images = QCheckBox(
-            "自动加载邮件中的网络图片（可能向发件方暴露已读状态）"
-        )
-        self.auto_load_images.setChecked(bool(values.get("auto_load_images", True)))
         self.save_eml = QCheckBox("保存每封邮件的 EML 原件（会明显增加磁盘占用）")
         self.save_eml.setChecked(bool(values.get("save_eml", False)))
         self._add_row(range_form, "目标文件夹", self.folders)
         self._add_row(range_form, "每账号每次最多新增（0=不限）", self.max_messages)
         self._add_row(range_form, "深度扫描", self.include_special)
-        self._add_row(range_form, "网络图片", self.auto_load_images)
         self._add_row(range_form, "邮件原件", self.save_eml)
 
         extraction_form = self._add_card(
@@ -864,7 +859,6 @@ class EnterpriseSettingsDialog(QDialog):
             "folders": [item.strip() for item in self.folders.text().split(",") if item.strip()],
             "max_messages": self.max_messages.value(),
             "include_special": self.include_special.isChecked(),
-            "auto_load_images": self.auto_load_images.isChecked(),
             "save_eml": self.save_eml.isChecked(),
             "extract_keywords": [
                 item.strip()

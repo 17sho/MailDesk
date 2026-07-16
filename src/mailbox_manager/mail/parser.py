@@ -59,7 +59,6 @@ _LAZY_IMAGE_ATTRIBUTES = (
 )
 _SRCSET_ATTRIBUTES = ("data-srcset", "srcset")
 MAX_IMAGE_REFERENCE_LENGTH = 4096
-MAX_DISCOVERED_REMOTE_IMAGES = 200
 _WINDOWS_RESERVED_NAMES = {
     "aux",
     "con",
@@ -297,8 +296,6 @@ class _SafeHtmlSanitizer(HTMLParser):
         self,
         *,
         inline_images: dict[str, tuple[str, bytes]],
-        remote_images: dict[str, tuple[str, bytes]],
-        remote_policy: str,
     ) -> None:
         super().__init__(convert_charrefs=True)
         self.parts: list[str] = []
@@ -306,8 +303,6 @@ class _SafeHtmlSanitizer(HTMLParser):
         self._inline_images = {
             key.strip().strip("<>").casefold(): value for key, value in inline_images.items()
         }
-        self._remote_images = remote_images
-        self._remote_policy = remote_policy
         self._picture_sources: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -397,17 +392,7 @@ class _SafeHtmlSanitizer(HTMLParser):
             image = self._inline_images.get(content_id)
             if image:
                 rendered_source = _data_image_uri(*image)
-        elif source.casefold().startswith(("http://", "https://")):
-            image = self._remote_images.get(source)
-            if image:
-                rendered_source = _data_image_uri(*image)
-            elif self._remote_policy == "preserve":
-                rendered_source = source
-            else:
-                label = f"图片：{alt}" if alt else "网络图片已阻止"
-                self.parts.append(f"<span>[{escape(label)}]</span>")
-                return
-        elif source.casefold().startswith("data:"):
+        elif source.casefold().startswith(("http://", "https://", "data:")):
             rendered_source = source
         if not rendered_source:
             if alt:
@@ -430,90 +415,15 @@ def sanitize_email_html(
     value: str,
     *,
     inline_images: dict[str, tuple[str, bytes]] | None = None,
-    remote_images: dict[str, tuple[str, bytes]] | None = None,
-    remote_policy: str = "block",
 ) -> str:
-    """Return a Qt-rich-text-safe HTML fragment.
+    """Return a safe HTML fragment while retaining the extracted image sources."""
 
-    ``remote_policy='preserve'`` is intended for encrypted local persistence only. UI rendering
-    uses the default blocking policy until the user explicitly requests network images.
-    """
-
-    if remote_policy not in {"block", "preserve", "embed"}:
-        raise ValueError("不支持的网络图片策略")
     parser = _SafeHtmlSanitizer(
         inline_images=inline_images or {},
-        remote_images=remote_images or {},
-        remote_policy=remote_policy,
     )
     parser.feed(normalize_email_html(value))
     parser.close()
     return "".join(parser.parts)[:MAX_STORED_HTML_LENGTH]
-
-
-class _RemoteImageCollector(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.urls: list[str] = []
-        self._ignored_depth = 0
-        self._picture_sources: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        tag = tag.casefold()
-        if self._ignored_depth:
-            if tag in _BLOCKED_CONTAINER_TAGS:
-                self._ignored_depth += 1
-            return
-        if tag in _BLOCKED_VOID_TAGS:
-            return
-        if tag in _BLOCKED_CONTAINER_TAGS:
-            self._ignored_depth = 1
-            return
-        values = {name.casefold(): (value or "") for name, value in attrs}
-        if tag == "picture":
-            self._picture_sources.append("")
-            return
-        if tag == "source":
-            if self._picture_sources and not self._picture_sources[-1]:
-                self._picture_sources[-1] = _preferred_image_reference(values)
-            return
-        if tag in {"img", "v:imagedata"}:
-            source = _preferred_image_reference(values)
-            picture_source = self._picture_sources[-1] if self._picture_sources else ""
-            if picture_source and (not source or source.casefold().startswith("data:")):
-                source = picture_source
-            self._append_remote(source)
-        for source in _background_image_references(values):
-            self._append_remote(source)
-
-    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.casefold() in _BLOCKED_TAGS:
-            return
-        self.handle_starttag(tag, attrs)
-        if tag.casefold() == "picture":
-            self.handle_endtag(tag)
-
-    def handle_endtag(self, tag: str) -> None:
-        tag = tag.casefold()
-        if self._ignored_depth:
-            if tag in _BLOCKED_CONTAINER_TAGS:
-                self._ignored_depth = max(0, self._ignored_depth - 1)
-            return
-        if tag == "picture" and self._picture_sources:
-            self._picture_sources.pop()
-
-    def _append_remote(self, source: str) -> None:
-        if (
-            source.casefold().startswith(("http://", "https://"))
-            and len(self.urls) < MAX_DISCOVERED_REMOTE_IMAGES
-        ):
-            self.urls.append(source)
-
-
-def remote_image_urls(value: str) -> tuple[str, ...]:
-    collector = _RemoteImageCollector()
-    collector.feed(normalize_email_html(value))
-    return tuple(dict.fromkeys(collector.urls))
 
 
 class _VisibleHtmlDetector(HTMLParser):
@@ -814,7 +724,6 @@ def _message_bodies(message: Message) -> tuple[str, str, str]:
         sanitize_email_html(
             html_source,
             inline_images=inline_images,
-            remote_policy="preserve",
         )
         if html_source
         else ""
@@ -826,7 +735,6 @@ def _message_bodies(message: Message) -> tuple[str, str, str]:
         web_html_body = sanitize_email_web_source(
             html_source,
             inline_images=inline_images,
-            remote_policy="preserve",
         )
     text_body = clean_message_text(plain_source) if plain_source else html_to_text(html_source)
     return text_body, html_body, web_html_body

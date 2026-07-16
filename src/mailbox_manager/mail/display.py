@@ -10,7 +10,6 @@ from mailbox_manager.mail.parser import (
     parse_email_message,
     sanitize_email_html,
 )
-from mailbox_manager.mail.web_document import web_remote_image_urls
 
 MAX_DISPLAY_EML_BYTES = 25 * 1024 * 1024
 
@@ -21,7 +20,6 @@ class MessageDisplayContent:
 
     html_fragment: str = ""
     plain_text: str = ""
-    remote_image_count: int = 0
     source_html: str = ""
 
     @property
@@ -54,7 +52,6 @@ def select_message_display_content(
     """
 
     source_html = web_html_body or html_body
-    remote_count = len(web_remote_image_urls(source_html)) if source_html else 0
     candidate_html = html_body or web_html_body
     if candidate_html:
         fragment = sanitize_email_html(candidate_html)
@@ -64,12 +61,10 @@ def select_message_display_content(
         if clean_message_text(fragment).strip() or detector.found:
             return MessageDisplayContent(
                 html_fragment=fragment,
-                remote_image_count=remote_count,
                 source_html=source_html,
             )
     return MessageDisplayContent(
         plain_text=clean_message_text(text_body),
-        remote_image_count=remote_count,
         source_html=source_html,
     )
 

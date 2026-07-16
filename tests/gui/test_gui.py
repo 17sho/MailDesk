@@ -837,7 +837,7 @@ def test_main_message_body_initializes_webengine_only_when_used(qtbot, tmp_path)
     assert window.message_body.toPlainText() == "延迟加载后的正文"
 
 
-def test_message_view_renders_inline_images_and_blocks_remote_images(qtbot, tmp_path) -> None:
+def test_message_view_renders_inline_and_remote_images_directly(qtbot, tmp_path) -> None:
     database = Database(tmp_path / "html-message.db")
     database.initialize()
     accounts = AccountRepository(database, CredentialCipher.from_raw_key(b"H" * 32))
@@ -868,8 +868,8 @@ def test_message_view_renders_inline_images_and_blocks_remote_images(qtbot, tmp_
     rendered = window.message_body.document().toHtml()
     assert "图文正文" in window.message_body.toPlainText()
     assert "data:image/png;base64" in rendered
-    assert "https://images.example.com" not in rendered
-    assert window.message_image_bar.isHidden() is False
+    assert "https://images.example.com/banner.png" in rendered
+    assert window.message_tools_bar.isHidden() is False
 
 
 def test_main_message_detail_displays_image_attachments_and_download_panel(

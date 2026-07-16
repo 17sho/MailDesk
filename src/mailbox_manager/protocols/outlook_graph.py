@@ -248,12 +248,10 @@ class OutlookGraphClient(EmailClientBase):
             html_body = sanitize_email_html(
                 raw_content,
                 inline_images=inline_images,
-                remote_policy="preserve",
             )
             web_html_body = sanitize_email_web_source(
                 raw_content,
                 inline_images=inline_images,
-                remote_policy="preserve",
             )
             text = html_to_text(raw_content)
         else:

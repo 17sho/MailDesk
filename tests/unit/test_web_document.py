@@ -3,7 +3,6 @@ from __future__ import annotations
 from mailbox_manager.mail.web_document import (
     prepare_email_web_document,
     sanitize_email_web_source,
-    web_remote_image_urls,
 )
 
 
@@ -25,7 +24,7 @@ def test_web_source_preserves_layout_but_removes_active_content() -> None:
     </body></html>
     """
 
-    source = sanitize_email_web_source(html, remote_policy="preserve")
+    source = sanitize_email_web_source(html)
 
     assert ".card { max-width: 600px; padding: 24px" in source
     assert 'class="card"' in source
@@ -41,39 +40,31 @@ def test_web_source_preserves_layout_but_removes_active_content() -> None:
     assert "http-equiv" not in source.casefold()
 
 
-def test_web_images_ignore_tracking_pixel_and_embed_brand_image() -> None:
+def test_web_images_preserve_every_extracted_remote_source() -> None:
     html = """
     <img src="https://cdn.example.com/openai-logo.png" width="560" height="168">
     <img src="https://track.example.com/open.php" width="1" height="1">
     """
 
-    assert web_remote_image_urls(html) == ("https://cdn.example.com/openai-logo.png",)
-    source = sanitize_email_web_source(
-        html,
-        remote_images={"https://cdn.example.com/openai-logo.png": ("image/png", b"png")},
-        remote_policy="embed",
-    )
+    source = sanitize_email_web_source(html)
     document = prepare_email_web_document(source)
 
-    assert "data:image/png;base64,cG5n" in document
+    assert "https://cdn.example.com/openai-logo.png" in document
+    assert "https://track.example.com/open.php" in document
     assert "maildesk-brand-image" in document
-    assert "maildesk-tracking-pixel" in document
     assert "max-width: 220px" in document
 
 
-def test_css_remote_assets_are_discovered_and_never_left_in_blocked_document() -> None:
+def test_css_remote_images_are_preserved_for_direct_rendering() -> None:
     html = """
     <style>.hero { background-image:url('https://cdn.example.com/hero.png'); }</style>
     <div class="hero" style="background:url(https://cdn.example.com/card.jpg)">正文</div>
     """
 
-    assert web_remote_image_urls(html) == (
-        "https://cdn.example.com/hero.png",
-        "https://cdn.example.com/card.jpg",
-    )
-    document = prepare_email_web_document(html, remote_policy="block")
+    document = prepare_email_web_document(html)
 
-    assert "https://cdn.example.com" not in document
+    assert "https://cdn.example.com/hero.png" in document
+    assert "https://cdn.example.com/card.jpg" in document
     assert "正文" in document
 
 

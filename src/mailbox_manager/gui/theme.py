@@ -406,36 +406,16 @@ QPlainTextEdit#matchView, QPlainTextEdit#logView {
     border-radius: 0;
     padding: 10px;
 }
-QFrame#messageImageBar, QFrame#mailViewerImageBar, QFrame#mailTranslationBar {
+QFrame#mailTranslationBar {
     background: #f8fbff;
     border: 1px solid #d8e7fb;
     border-radius: 9px;
     margin: 4px 0;
 }
-QLabel#messageImageLabel, QLabel#mailViewerImageLabel,
-QLabel#imageStatusLabel, QLabel#mailTranslationLanguage {
+QLabel#mailTranslationLanguage {
     color: #52627a;
     font-size: 11px;
     font-weight: 500;
-}
-QPushButton#remoteImageButton {
-    background: #ffffff;
-    color: #1d4ed8;
-    border: 1px solid #bfdbfe;
-    border-radius: 7px;
-    padding: 4px 10px;
-    min-height: 18px;
-    font-weight: 600;
-}
-QPushButton#remoteImageButton:hover {
-    background: #eff6ff;
-    border-color: #93c5fd;
-}
-QPushButton#remoteImageButton:pressed { background: #dbeafe; }
-QPushButton#remoteImageButton:disabled {
-    background: #f8fafc;
-    color: #94a3b8;
-    border-color: #e2e8f0;
 }
 QPushButton#translationButton, QPushButton#translateMessageButton {
     background: #e8f1ff;
@@ -1502,36 +1482,16 @@ QPlainTextEdit#matchView, QPlainTextEdit#logView {
     border-radius: 0;
     padding: 10px;
 }
-QFrame#messageImageBar, QFrame#mailViewerImageBar, QFrame#mailTranslationBar {
+QFrame#mailTranslationBar {
     background: #142238;
     border: 1px solid #29415f;
     border-radius: 9px;
     margin: 4px 0;
 }
-QLabel#messageImageLabel, QLabel#mailViewerImageLabel,
-QLabel#imageStatusLabel, QLabel#mailTranslationLanguage {
+QLabel#mailTranslationLanguage {
     color: #aeb9c9;
     font-size: 11px;
     font-weight: 500;
-}
-QPushButton#remoteImageButton {
-    background: #172a44;
-    color: #93c5fd;
-    border: 1px solid #31547c;
-    border-radius: 7px;
-    padding: 4px 10px;
-    min-height: 18px;
-    font-weight: 600;
-}
-QPushButton#remoteImageButton:hover {
-    background: #1d3b68;
-    border-color: #3b6a9f;
-}
-QPushButton#remoteImageButton:pressed { background: #244b7c; }
-QPushButton#remoteImageButton:disabled {
-    background: #151d2a;
-    color: #69768a;
-    border-color: #2b374a;
 }
 QPushButton#translationButton, QPushButton#translateMessageButton {
     background: #1d3b68;

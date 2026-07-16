@@ -9,7 +9,6 @@ from mailbox_manager.mail.parser import (
     has_visible_email_html,
     html_to_text,
     parse_email_message,
-    remote_image_urls,
     safe_attachment_filename,
     sanitize_email_html,
 )
@@ -181,23 +180,18 @@ def test_protocol_relative_image_link_is_normalized_but_credential_link_is_remov
     stored = sanitize_email_html(
         '<a href="//example.com/open"><img src="https://images.example.com/button.png"></a>'
         '<a href="https://user:secret@example.com/private">unsafe</a>',
-        remote_policy="preserve",
     )
 
     assert '<a href="https://example.com/open">' in stored
     assert "user:secret" not in stored
 
 
-def test_remote_images_are_preserved_for_storage_but_blocked_for_display() -> None:
+def test_remote_images_are_preserved_in_extracted_html() -> None:
     stored = sanitize_email_html(
         '<p>Hello</p><img src="https://images.example.com/banner.png" alt="横幅">',
-        remote_policy="preserve",
     )
-    rendered = sanitize_email_html(stored)
-
-    assert remote_image_urls(stored) == ("https://images.example.com/banner.png",)
-    assert "https://images.example.com" not in rendered
-    assert "横幅" in rendered
+    assert 'src="https://images.example.com/banner.png"' in stored
+    assert "横幅" in stored
 
 
 def test_head_meta_and_style_do_not_swallow_xai_style_html_body() -> None:
@@ -212,14 +206,12 @@ def test_head_meta_and_style_do_not_swallow_xai_style_html_body() -> None:
     </td></tr></table></body></html>
     """
 
-    stored = sanitize_email_html(html, remote_policy="preserve")
+    stored = sanitize_email_html(html)
 
     assert "New features are ready" in stored
     assert "Read the release summary" in stored
     assert len(stored.strip()) > 100
-    assert remote_image_urls(stored) == (
-        "https://images.example.com/product-update.png",
-    )
+    assert "https://images.example.com/product-update.png" in stored
     assert has_visible_email_html(stored) is True
 
 
@@ -240,17 +232,16 @@ def test_common_lazy_picture_srcset_and_background_images_are_normalized() -> No
     <img src="{png_data}" alt="inline data">
     """
 
-    discovered = remote_image_urls(html)
-    stored = sanitize_email_html(html, remote_policy="preserve")
+    stored = sanitize_email_html(html)
 
-    assert discovered == (
+    expected_urls = (
         "https://cdn.example.com/hero.webp",
         "https://images.example.com/lazy.png",
         "https://images.example.com/legacy.png",
         "https://images.example.com/bg.png",
         "https://images.example.com/small.png",
     )
-    assert remote_image_urls(stored) == discovered
+    assert all(url in stored for url in expected_urls)
     assert "javascript:" not in stored
     assert "srcset=" not in stored
     assert 'src="data:image/png;base64,' in stored
