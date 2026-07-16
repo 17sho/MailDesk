@@ -53,8 +53,10 @@ def should_include_macos_qt_payload(destination: str) -> bool:
     """Keep only Qt frameworks and Python bindings required by MailDesk."""
 
     normalized = destination.replace("\\", "/").casefold()
-    if not normalized.startswith("pyside6/"):
+    marker = "pyside6/"
+    if marker not in normalized:
         return True
+    normalized = marker + normalized.rsplit(marker, 1)[1]
     parts = normalized.split("/")
     for part in parts:
         if part.endswith(".framework"):
@@ -64,6 +66,12 @@ def should_include_macos_qt_payload(destination: str) -> bool:
         module = filename.split(".", 1)[0]
         return module in _MACOS_QT_BINDINGS
     return True
+
+
+def should_include_macos_qt_entry(destination: str, source: str) -> bool:
+    """Filter both sides of a PyInstaller entry, including macOS symlinks."""
+
+    return should_include_macos_qt_payload(destination) and should_include_macos_qt_payload(source)
 
 
 def normalize_macos_arch(machine: str) -> str:

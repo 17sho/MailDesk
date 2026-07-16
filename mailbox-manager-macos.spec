@@ -6,9 +6,7 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files
 
 from build import should_include_qt_payload
-from build_macos import (
-    should_include_macos_qt_payload,
-)
+from build_macos import should_include_macos_qt_entry
 
 ROOT = Path(SPECPATH)
 with (ROOT / "pyproject.toml").open("rb") as stream:
@@ -57,13 +55,13 @@ analysis.binaries = [
     entry
     for entry in analysis.binaries
     if should_include_qt_payload(entry[0])
-    and should_include_macos_qt_payload(entry[0])
+    and should_include_macos_qt_entry(entry[0], entry[1])
 ]
 analysis.datas = [
     entry
     for entry in analysis.datas
     if should_include_qt_payload(entry[0])
-    and should_include_macos_qt_payload(entry[0])
+    and should_include_macos_qt_entry(entry[0], entry[1])
 ]
 pyz = PYZ(analysis.pure)
 executable = EXE(

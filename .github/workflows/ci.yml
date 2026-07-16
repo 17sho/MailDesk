@@ -14,8 +14,6 @@ jobs:
     timeout-minutes: 20
     env:
       QT_QPA_PLATFORM: offscreen
-      QTWEBENGINE_CHROMIUM_FLAGS: --disable-gpu --no-sandbox
-      QTWEBENGINE_DISABLE_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v4
         with:

@@ -26,8 +26,6 @@ jobs:
     timeout-minutes: 35
     env:
       QT_QPA_PLATFORM: offscreen
-      QTWEBENGINE_CHROMIUM_FLAGS: --disable-gpu --no-sandbox
-      QTWEBENGINE_DISABLE_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +58,10 @@ jobs:
           done
           test ! -d "dist/MailDesk.app/Contents/Frameworks/PySide6/Qt/lib/QtWebEngineCore.framework"
           test ! -f "dist/MailDesk.app/Contents/Frameworks/PySide6/QtWebEngineWidgets.abi3.so"
+          if find dist/MailDesk.app \( -type f -o -type l \) -print | grep -Eiq 'QtWebEngine|Chromium|QtQuick|QtQml|QtWebChannel'; then
+            echo "Found a forbidden Chromium/QML payload or symlink" >&2
+            exit 1
+          fi
           file dist/MailDesk.app/Contents/MacOS/MailDesk
           file dist/MailDesk.app/Contents/MacOS/MailDesk | grep -q "${{ matrix.expected_machine }}"
           plutil -lint dist/MailDesk.app/Contents/Info.plist
