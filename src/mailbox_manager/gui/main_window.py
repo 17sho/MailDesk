@@ -4,7 +4,6 @@ import base64
 import logging
 import threading
 from collections import Counter
-from dataclasses import replace
 from html import escape as html_escape
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1879,7 +1878,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "收件设置无效", str(exc))
             return
-        self._queue_fetch([account], replace(request, max_messages=1))
+        self._queue_fetch([account], request)
 
     def _queue_fetch(
         self, accounts: list[EmailAccount], request: FetchRequest

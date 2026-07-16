@@ -23,6 +23,7 @@ from mailbox_manager.app import configure_translations
 from mailbox_manager.domain.models import (
     AccountStatus,
     EmailAccount,
+    FetchRequest,
     Group,
     MailAttachment,
     MailMessage,
@@ -948,16 +949,22 @@ def test_immediate_fetch_queues_only_the_active_account(qtbot, tmp_path) -> None
     database.initialize()
     accounts = AccountRepository(database, CredentialCipher.from_raw_key(b"U" * 32))
     accounts.add_many([_account()])
-    window = MainWindow(accounts, MessageRepository(database))
+    settings = SettingsRepository(database)
+    settings.set("fetch", {"folders": ["INBOX"], "max_messages": 37})
+    window = MainWindow(accounts, MessageRepository(database), settings=settings)
     qtbot.addWidget(window)
-    queued: list[list[EmailAccount]] = []
-    window._queue_fetch = lambda selected, _request: queued.append(selected)  # type: ignore[method-assign]
+    queued: list[tuple[list[EmailAccount], FetchRequest]] = []
+    window._queue_fetch = lambda selected, request: queued.append(  # type: ignore[method-assign]
+        (selected, request)
+    )
 
     window._account_row_clicked(window.account_model.index(0, 1))
     window.fetch_active_account()
 
     assert len(queued) == 1
-    assert [account.email for account in queued[0]] == ["owner@example.com"]
+    selected, request = queued[0]
+    assert [account.email for account in selected] == ["owner@example.com"]
+    assert request.max_messages == 37
 
 
 def test_checked_account_can_send_from_compose_dialog_in_background(
