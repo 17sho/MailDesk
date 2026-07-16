@@ -8,9 +8,12 @@
   `v0.3.9 → v0.4.0` 无法移动旧 `MailDesk` 文件夹的问题。
 - 安装助手现在固定从独立更新目录运行，目录替换支持短时重试；升级失败会清理
   已验证但不再需要的暂存副本，避免连续重试占用数百 MB。
-- Release 额外提供 5.5 KB 的 `MailDesk-v0.3.9-onedir-update-launcher.exe`。
-  已安装旧 v0.3.9 文件夹版的用户只需用它安全启动旧版一次，再在软件中点击
-  “重启并安装”；旁边的 `MailDesk Data` 不会被移动或删除。
+- Release 额外提供 `MailDesk-v0.4.0-hotfix-windows-x64-onedir.zip`，供已经安装
+  v0.3.9 文件夹版的用户彻底退出程序后人工覆盖一次 `MailDesk` 程序文件夹；同级
+  `MailDesk Data` 必须保留，账号和邮件不会被移动或删除。
+- 5.5 KB 的 `MailDesk-v0.3.9-onedir-update-launcher.exe` 仅用于让旧版内置按钮
+  绕过工作目录占用、复测原始升级流程；要安装包含根治代码的版本，仍应使用上面的
+  hotfix ZIP。
 
 ## 界面与字体
 
