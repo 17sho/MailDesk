@@ -798,11 +798,13 @@ def test_installer_plan_waits_replaces_rolls_back_and_restarts(
 
     script = plan.script_path.read_text(encoding="utf-8-sig")
     assert "$ParentProcess.WaitForExit(120000)" in script
+    assert "Set-Location -LiteralPath (Split-Path -Parent $TargetPath)" in script
+    assert "function Move-ItemWithRetry" in script
     assert "Set-Content -LiteralPath $ReadyPath" in script
     assert "New MailDesk process did not report healthy startup" in script
-    assert "Move-Item -LiteralPath $IncomingPath -Destination $TargetPath" in script
+    assert "Move-ItemWithRetry -LiteralPath $IncomingPath -Destination $TargetPath" in script
     assert "Update staged file integrity check failed" in script
-    assert "Move-Item -LiteralPath $TargetPath -Destination $BackupPath" in script
+    assert "Move-ItemWithRetry -LiteralPath $TargetPath -Destination $BackupPath" in script
     assert "$OriginalMoved = $true" in script
     assert "if ($OriginalMoved)" in script
     assert "Remove-Item -LiteralPath $TargetPath" in script
@@ -949,7 +951,15 @@ def test_powershell_helper_rolls_back_an_onedir_start_failure(tmp_path: Path) ->
         executable_path=current,
         parent_pid=parent.pid,
     )
-    helper = service.launch_installer(plan)
+    # Reproduce the packaged v0.3.9 process: its cwd is the onedir payload.
+    # The helper must not inherit this directory or Windows will refuse to
+    # rename it during the update.
+    previous_cwd = Path.cwd()
+    os.chdir(current.parent)
+    try:
+        helper = service.launch_installer(plan)
+    finally:
+        os.chdir(previous_cwd)
     service.release_update_lock()
 
     assert helper.wait(timeout=30) == 1
@@ -958,6 +968,7 @@ def test_powershell_helper_rolls_back_an_onedir_start_failure(tmp_path: Path) ->
     assert old_runtime.read_bytes() == b"old runtime"
     assert not plan.backup_path.exists()
     assert plan.incoming_path is not None and not plan.incoming_path.exists()
+    assert not staging.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="PowerShell updater is Windows-only")
@@ -998,7 +1009,15 @@ def test_powershell_helper_updates_onedir_without_touching_sibling_user_data(
         executable_path=current,
         parent_pid=parent.pid,
     )
-    helper = service.launch_installer(plan)
+    # This was the real v0.3.9 failure mode: the GUI was launched from the
+    # onedir folder, so an updater without an explicit cwd inherited and
+    # locked the exact directory it then tried to rename.
+    previous_cwd = Path.cwd()
+    os.chdir(current.parent)
+    try:
+        helper = service.launch_installer(plan)
+    finally:
+        os.chdir(previous_cwd)
     service.release_update_lock()
     parent.terminate()
     parent.wait(timeout=5)

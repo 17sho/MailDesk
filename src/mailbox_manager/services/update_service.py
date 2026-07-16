@@ -1209,6 +1209,11 @@ class UpdateService:
                 creationflags=creation_flags,
                 start_new_session=os.name != "nt",
                 env=environment,
+                # Never let the helper inherit the packaged application's
+                # directory as its current working directory.  Windows keeps
+                # a process' cwd busy, which prevents the onedir helper from
+                # renaming that directory after the GUI exits.
+                cwd=plan.script_path.parent,
             )
         except OSError as exc:
             self.release_update_lock()
@@ -2247,6 +2252,44 @@ _POWERSHELL_INSTALLER_SCRIPT = r'''param(
 
 $ErrorActionPreference = "Stop"
 
+function Move-ItemWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$LiteralPath,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $Deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        try {
+            Move-Item `
+                -LiteralPath $LiteralPath `
+                -Destination $Destination `
+                -ErrorAction Stop
+            return
+        } catch {
+            if ([DateTime]::UtcNow -ge $Deadline) {
+                throw
+            }
+            Start-Sleep -Milliseconds 250
+        }
+    }
+}
+
+# PowerShell inherits the GUI process' working directory by default.  If that
+# directory is the onedir payload Windows refuses to rename it even after the
+# GUI process has exited.  Move the helper to the stable parent directory
+# before announcing that it is ready to take over.
+try {
+    Set-Location -LiteralPath (Split-Path -Parent $TargetPath)
+} catch {
+    Set-Content `
+        -LiteralPath $ResultPath `
+        -Value "safe_working_directory_failed" `
+        -Encoding UTF8
+    exit 3
+}
+
 function Get-Sha256Hex {
     param([Parameter(Mandatory = $true)][string]$LiteralPath)
 
@@ -2388,10 +2431,10 @@ try {
         Remove-Item -LiteralPath $BackupPath -Recurse -Force
     }
     if ($HadOriginal) {
-        Move-Item -LiteralPath $TargetPath -Destination $BackupPath
+        Move-ItemWithRetry -LiteralPath $TargetPath -Destination $BackupPath
         $OriginalMoved = $true
     }
-    Move-Item -LiteralPath $IncomingPath -Destination $TargetPath
+    Move-ItemWithRetry -LiteralPath $IncomingPath -Destination $TargetPath
     $StartInfo = New-Object System.Diagnostics.ProcessStartInfo
     $StartInfo.FileName = $RestartExecutable
     $StartInfo.WorkingDirectory = Split-Path -Parent $RestartExecutable
@@ -2467,7 +2510,9 @@ try {
                 Remove-Item -LiteralPath $TargetPath -Recurse -Force
             }
             if (Test-Path -LiteralPath $BackupPath) {
-                Move-Item -LiteralPath $BackupPath -Destination $TargetPath
+                Move-ItemWithRetry `
+                    -LiteralPath $BackupPath `
+                    -Destination $TargetPath
             }
         } elseif (-not $HadOriginal -and (Test-Path -LiteralPath $TargetPath)) {
             Remove-Item -LiteralPath $TargetPath -Recurse -Force
@@ -2483,6 +2528,15 @@ try {
                 -Encoding UTF8
         } catch {
             # A diagnostic write failure must not prevent restarting the old version.
+        }
+        try {
+            if (Test-Path -LiteralPath $CleanupPath) {
+                Remove-Item -LiteralPath $CleanupPath -Recurse -Force
+            }
+            Remove-Item -LiteralPath $HealthPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
+        } catch {
+            # A failed-update cleanup error must not hide the original result.
         }
         if (Test-Path -LiteralPath $RestartExecutable) {
             Start-Process `

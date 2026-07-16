@@ -30,3 +30,11 @@ jobs:
         run: python -m ruff check src tests build.py release.py
       - name: Test
         run: python -m pytest -q
+      - name: Build v0.3.9 onedir recovery launcher
+        shell: powershell
+        run: |
+          & .\tools\windows_update_recovery\build.ps1
+          $launcher = Get-Item artifacts\MailDesk-v0.3.9-onedir-update-launcher.exe
+          if ($launcher.Length -gt 32768) {
+            throw "Recovery launcher unexpectedly exceeds 32 KiB"
+          }
